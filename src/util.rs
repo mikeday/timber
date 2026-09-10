@@ -27,6 +27,17 @@ pub fn place(mix: &mut Vec<f32>, note: &[f32], at: f32) {
     }
 }
 
+/// Fade the last 10ms of a buffer to zero. A render whose duration ends
+/// while the model is still vibrating would otherwise step straight to
+/// silence — an audible click, worst at low frequencies.
+pub fn fade_out(buf: &mut [f32]) {
+    let n = ((0.01 * SR) as usize).min(buf.len());
+    let len = buf.len();
+    for i in 0..n {
+        buf[len - n + i] *= 1.0 - (i + 1) as f32 / n as f32;
+    }
+}
+
 /// Scale a buffer so its peak is `level`. Lets each model's `level` field
 /// mean the same thing regardless of how hot the raw synthesis runs.
 pub fn normalize(buf: &mut [f32], level: f32) {

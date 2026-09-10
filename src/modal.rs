@@ -7,7 +7,7 @@
 //! 2.14, 2.30, 2.65... — inharmonic and densely packed, which is why a
 //! drum sounds like a drum. Timbre is literally this list of numbers.
 
-use crate::util::{Rng, SR, normalize};
+use crate::util::{Rng, SR, fade_out, normalize};
 use std::f32::consts::TAU;
 
 #[derive(Clone, Copy)]
@@ -185,5 +185,6 @@ pub fn render(h: &Hit, rng: &mut Rng) -> Vec<f32> {
     }
 
     normalize(&mut out, h.level);
+    fade_out(&mut out);
     out
 }

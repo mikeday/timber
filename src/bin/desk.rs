@@ -98,8 +98,16 @@ fn start_audio(mixer: Arc<Mixer>, rx: Receiver<(usize, Vec<f32>, Option<u8>)>) -
                             }
                         }
                     }
-                    if voices.len() >= 64 {
+                    // At the soft cap, retire the oldest voice with the
+                    // same quick fade a choke gets; hard-drop only if
+                    // truly flooded.
+                    if voices.len() >= 96 {
                         voices.remove(0);
+                    }
+                    if voices.len() >= 64
+                        && let Some(v) = voices.iter_mut().find(|v| !v.dying)
+                    {
+                        v.dying = true;
                     }
                     voices.push(PlayVoice {
                         buf,

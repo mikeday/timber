@@ -7,7 +7,7 @@
 //! loop: the loss filter is the string's material, an allpass is its
 //! stiffness, the shape of the initial noise is where and how you plucked.
 
-use crate::util::{Rng, SR};
+use crate::util::{Rng, SR, fade_out};
 
 /// One plucked note. Mutate these fields — that's the whole point.
 #[derive(Clone, Copy)]
@@ -111,6 +111,7 @@ pub fn render(p: &Pluck, rng: &mut Rng) -> Vec<f32> {
         line[idx] = p.decay * tuned;
         idx = (idx + 1) % n;
     }
+    fade_out(&mut out);
     out
 }
 
