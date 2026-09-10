@@ -31,9 +31,19 @@ pub struct Hit<'a> {
     pub glide: f32,
     /// Seconds for the tension to settle back.
     pub glide_time: f32,
+    /// Muffling: scales every mode's decay time. 1.0 is the bare object;
+    /// 0.3 is a pillow against the head — the tight, dry studio kick.
+    /// Thump is tightness: the whack-then-gone contrast, not length.
+    pub damp: f32,
     /// Rattle mixed in on top — snare wires against the bottom head.
     pub noise: f32,
     pub noise_decay: f32,
+    /// Saturation. A hard-driven membrane vibrates nonlinearly, folding
+    /// energy into harmonics of its modes — this is most of what makes a
+    /// kick sound *loud* rather than merely low, since ears (and small
+    /// speakers) are weak at 50 Hz but fine at its overtones. 0 is clean;
+    /// 2-4 is meaty; silly values are fuzz.
+    pub drive: f32,
     /// Peak amplitude, 0.0..1.0.
     pub level: f32,
 }
@@ -46,8 +56,10 @@ impl Default for Hit<'_> {
             duration: 1.5,
             glide: 0.0,
             glide_time: 0.1,
+            damp: 1.0,
             noise: 0.0,
             noise_decay: 0.1,
+            drive: 0.0,
             level: 0.8,
         }
     }
@@ -168,7 +180,7 @@ pub fn render(h: &Hit, rng: &mut Rng) -> Vec<f32> {
             // Pitch glide: every mode rides the same tension curve.
             let f = h.freq * m.ratio * (1.0 + h.glide * (-t / h.glide_time).exp());
             phase = (phase + f / SR) % 1.0;
-            *s += m.gain * (-t / m.decay).exp() * (TAU * phase).sin();
+            *s += m.gain * (-t / (m.decay * h.damp)).exp() * (TAU * phase).sin();
         }
     }
 
@@ -184,6 +196,15 @@ pub fn render(h: &Hit, rng: &mut Rng) -> Vec<f32> {
         }
     }
 
+    if h.drive > 0.0 {
+        // Normalize first so drive means the same thing at any mode-list
+        // gain sum, then waveshape: tanh compresses the peaks and grows
+        // odd harmonics, fattening the sound without raising its peak.
+        normalize(&mut out, 1.0);
+        for s in out.iter_mut() {
+            *s = (h.drive * *s).tanh();
+        }
+    }
     normalize(&mut out, h.level);
     fade_out(&mut out);
     out

@@ -199,8 +199,10 @@ struct DrumParams {
     duration: f32,
     glide: f32,
     glide_time: f32,
+    damp: f32,
     noise: f32,
     noise_decay: f32,
+    drive: f32,
     level: f32,
     choke: Option<u8>,
 }
@@ -213,19 +215,29 @@ fn default_pads() -> Vec<DrumParams> {
         duration: 1.2,
         glide: 0.0,
         glide_time: 0.1,
+        damp: 1.0,
         noise: 0.0,
         noise_decay: 0.1,
+        drive: 0.0,
         level: 0.85,
         choke: None,
     };
     vec![
+        // Tight studio kick: tuned up where ears respond, heavily
+        // muffled, small fast pitch settle, beater click, some drive.
         DrumParams {
             name: "kick",
             modes: ModeSet::Center,
-            freq: 50.0,
-            duration: 0.8,
-            glide: 0.9,
-            glide_time: 0.06,
+            freq: 60.0,
+            duration: 0.5,
+            glide: 0.5,
+            glide_time: 0.035,
+            damp: 0.35,
+            // A touch of very fast rattle is the beater's impact click.
+            noise: 0.18,
+            noise_decay: 0.004,
+            drive: 1.8,
+            level: 1.0,
             ..base
         },
         DrumParams {
@@ -324,8 +336,10 @@ impl Desk {
             duration: p.duration,
             glide: p.glide,
             glide_time: p.glide_time.max(0.005),
+            damp: p.damp,
             noise: p.noise,
-            noise_decay: p.noise_decay.max(0.005),
+            noise_decay: p.noise_decay.max(0.002),
+            drive: p.drive,
             level: p.level,
         };
         let _ = self
@@ -360,6 +374,11 @@ fn slider(
     log: bool,
     label: &str,
 ) {
+    // Size the track to the column: egui's default track width plus the
+    // value box and label would spill into the next column and overlap.
+    // The reserve must cover the widest label plus the value box and
+    // item spacing ("rattle decay" ≈ 82 + 48 + 16).
+    ui.spacing_mut().slider_width = (ui.available_width() - 170.0).clamp(40.0, 200.0);
     ui.add(egui::Slider::new(v, range).logarithmic(log).text(label));
 }
 
@@ -469,6 +488,7 @@ impl eframe::App for Desk {
                 let p = &mut self.pads[self.pad_sel];
                 ui.label(format!("editing: {}", p.name));
                 egui::ComboBox::from_label("object")
+                    .width((ui.available_width() - 130.0).clamp(80.0, 160.0))
                     .selected_text(p.modes.name())
                     .show_ui(ui, |ui| {
                         for m in [
@@ -484,8 +504,10 @@ impl eframe::App for Desk {
                 slider(ui, &mut p.duration, 0.05..=6.0, true, "duration");
                 slider(ui, &mut p.glide, 0.0..=1.5, false, "pitch glide");
                 slider(ui, &mut p.glide_time, 0.01..=0.5, true, "glide time");
+                slider(ui, &mut p.damp, 0.1..=3.0, true, "muffle");
                 slider(ui, &mut p.noise, 0.0..=1.0, false, "rattle");
-                slider(ui, &mut p.noise_decay, 0.01..=0.5, true, "rattle decay");
+                slider(ui, &mut p.noise_decay, 0.002..=0.5, true, "rattle decay");
+                slider(ui, &mut p.drive, 0.0..=6.0, false, "drive");
                 slider(ui, &mut p.level, 0.0..=1.0, false, "level");
                 let mut chokes = p.choke.is_some();
                 if ui.checkbox(&mut chokes, "choke group").changed() {
@@ -596,7 +618,7 @@ fn main() -> eframe::Result {
     eframe::run_native(
         "timber desk",
         eframe::NativeOptions {
-            viewport: egui::ViewportBuilder::default().with_inner_size([900.0, 480.0]),
+            viewport: egui::ViewportBuilder::default().with_inner_size([1020.0, 520.0]),
             ..Default::default()
         },
         Box::new(|_cc| Ok(Box::new(desk))),

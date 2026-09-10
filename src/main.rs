@@ -12,12 +12,18 @@ fn main() {
     let mut mix = Vec::new();
 
     // ---- The kit: one modal engine, five mode lists ----------------------
+    // Tight studio kick: tuned up where ears respond, heavily muffled,
+    // small fast pitch settle, beater click, membrane drive.
     let kick = Hit {
-        freq: 50.0,
+        freq: 60.0,
         modes: modal::MEMBRANE_CENTER,
-        duration: 0.8,
-        glide: 0.9, // the deep 808-ish drop is pure tension modulation
-        glide_time: 0.06,
+        duration: 0.5,
+        glide: 0.5, // the pitch-settle of a hard strike
+        glide_time: 0.035,
+        damp: 0.35,  // pillow against the head
+        noise: 0.18, // the beater's impact click
+        noise_decay: 0.004,
+        drive: 1.8, // membrane nonlinearity: harmonics carry the weight
         level: 0.95,
         ..Default::default()
     };
