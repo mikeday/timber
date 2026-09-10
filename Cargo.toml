@@ -1,0 +1,10 @@
+[package]
+name = "timber"
+version = "0.1.0"
+edition = "2024"
+default-run = "timber"
+
+[dependencies]
+hound = "3.5"
+cpal = "0.15"
+eframe = "0.29"
