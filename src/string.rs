@@ -46,9 +46,22 @@ impl Default for Pluck {
 }
 
 pub fn render(p: &Pluck, rng: &mut Rng) -> Vec<f32> {
-    // Delay length sets the pitch. Rounding costs a few cents at low
-    // frequencies; a fractional-delay allpass fixes that, later.
-    let n = (SR / p.freq).round().max(2.0) as usize;
+    // The pitch is set by the *total* delay around the loop, which is
+    // rarely a whole number of samples. The integer delay line gets us
+    // within a sample; a first-order allpass tuned to the fractional
+    // remainder d (coefficient (1-d)/(1+d)) supplies the rest. An allpass
+    // rather than interpolation because its magnitude response is flat:
+    // it adds delay without adding loss inside the loop. The loss filter
+    // (~damping samples at low frequency) and the stiffness allpass
+    // ((1-a)/(1+a) samples) contribute delay of their own, so they are
+    // subtracted from the budget first.
+    let period = SR / p.freq;
+    let others = p.damping + (1.0 - p.stiffness) / (1.0 + p.stiffness);
+    let target = period - others;
+    // Keep d in 0.5..1.5, the allpass's well-behaved range.
+    let n = ((target - 0.5).floor().max(2.0)) as usize;
+    let d = target - n as f32;
+    let tune = (1.0 - d) / (1.0 + d);
 
     // The pluck: one period of noise.
     let mut line: Vec<f32> = (0..n).map(|_| rng.next()).collect();
@@ -67,8 +80,10 @@ pub fn render(p: &Pluck, rng: &mut Rng) -> Vec<f32> {
     let len = (p.duration * SR) as usize;
     let mut out = Vec::with_capacity(len);
     let mut prev = 0.0f32; // loss-filter memory
-    let mut ap_x1 = 0.0f32; // allpass memory
+    let mut ap_x1 = 0.0f32; // stiffness allpass memory
     let mut ap_y1 = 0.0f32;
+    let mut tn_x1 = 0.0f32; // tuning allpass memory
+    let mut tn_y1 = 0.0f32;
     let mut idx = 0usize;
 
     for _ in 0..len {
@@ -87,8 +102,54 @@ pub fn render(p: &Pluck, rng: &mut Rng) -> Vec<f32> {
         ap_x1 = lowpassed;
         ap_y1 = ap;
 
-        line[idx] = p.decay * ap;
+        // Fractional tuning: the same allpass structure, aimed at exactly
+        // the missing fraction of a sample.
+        let tuned = tune * ap + tn_x1 - tune * tn_y1;
+        tn_x1 = ap;
+        tn_y1 = tuned;
+
+        line[idx] = p.decay * tuned;
         idx = (idx + 1) % n;
     }
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Measure the rendered pitch by autocorrelation with parabolic
+    /// sub-sample refinement.
+    fn measured_freq(buf: &[f32], approx_freq: f32) -> f32 {
+        let approx = SR / approx_freq;
+        let ac = |lag: usize| -> f32 {
+            let n = 8192.min(buf.len() - lag);
+            (0..n).map(|i| buf[i] * buf[i + lag]).sum()
+        };
+        let (lo, hi) = ((approx * 0.94) as usize, (approx * 1.06) as usize + 1);
+        let best = (lo..=hi).max_by(|&x, &y| ac(x).total_cmp(&ac(y))).unwrap();
+        let (a, b, c) = (ac(best - 1), ac(best), ac(best + 1));
+        SR / (best as f32 + 0.5 * (a - c) / (a - 2.0 * b + c))
+    }
+
+    #[test]
+    fn pitch_lands_within_two_cents() {
+        // 446.16 is deliberately awkward: its period is 98.84 samples,
+        // nearly the worst case for integer rounding (~3 cents off before
+        // fractional tuning; the highest notes were off by far more).
+        for freq in [110.0, 220.0, 446.16, 880.0, 1760.0] {
+            let p = Pluck {
+                freq,
+                duration: 1.0,
+                ..Default::default()
+            };
+            let buf = render(&p, &mut Rng(1));
+            let f = measured_freq(&buf[2205..], freq);
+            let cents = 1200.0 * (f / freq).log2();
+            assert!(
+                cents.abs() < 2.0,
+                "{freq} Hz came out {f:.2} Hz ({cents:+.1} cents)"
+            );
+        }
+    }
 }

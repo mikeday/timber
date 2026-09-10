@@ -59,9 +59,16 @@ struct PlayVoice {
     buf: Vec<f32>,
     pos: f32,
     strip: usize,
+    /// Voices sharing a choke group silence each other: a new hat hit
+    /// stops the ringing open hat, the way one physical instrument would.
+    choke: Option<u8>,
+    /// 1.0 while alive; a choked voice ramps this to 0 over a few ms
+    /// (cutting instantly would click) and is then dropped.
+    fade: f32,
+    dying: bool,
 }
 
-fn start_audio(mixer: Arc<Mixer>, rx: Receiver<(usize, Vec<f32>)>) -> cpal::Stream {
+fn start_audio(mixer: Arc<Mixer>, rx: Receiver<(usize, Vec<f32>, Option<u8>)>) -> cpal::Stream {
     let device = cpal::default_host()
         .default_output_device()
         .expect("no audio output device");
@@ -76,13 +83,21 @@ fn start_audio(mixer: Arc<Mixer>, rx: Receiver<(usize, Vec<f32>)>) -> cpal::Stre
     // Models render at 44.1k; if the device runs at another rate we just
     // read the buffers at a fractional step (linear interpolation).
     let step = SR / config.sample_rate.0 as f32;
+    let choke_step = 1.0 / (0.004 * config.sample_rate.0 as f32);
 
     let mut voices: Vec<PlayVoice> = Vec::new();
     let stream = device
         .build_output_stream(
             &config,
             move |data: &mut [f32], _| {
-                while let Ok((strip, buf)) = rx.try_recv() {
+                while let Ok((strip, buf, choke)) = rx.try_recv() {
+                    if let Some(group) = choke {
+                        for v in voices.iter_mut() {
+                            if v.choke == Some(group) {
+                                v.dying = true;
+                            }
+                        }
+                    }
                     if voices.len() >= 64 {
                         voices.remove(0);
                     }
@@ -90,6 +105,9 @@ fn start_audio(mixer: Arc<Mixer>, rx: Receiver<(usize, Vec<f32>)>) -> cpal::Stre
                         buf,
                         pos: 0.0,
                         strip,
+                        choke,
+                        fade: 1.0,
+                        dying: false,
                     });
                 }
                 for frame in data.chunks_mut(channels) {
@@ -100,8 +118,14 @@ fn start_audio(mixer: Arc<Mixer>, rx: Receiver<(usize, Vec<f32>)>) -> cpal::Stre
                             return false;
                         }
                         let frac = v.pos - i as f32;
-                        let s = v.buf[i] * (1.0 - frac) + v.buf[i + 1] * frac;
+                        let s = (v.buf[i] * (1.0 - frac) + v.buf[i + 1] * frac) * v.fade;
                         v.pos += step;
+                        if v.dying {
+                            v.fade -= choke_step;
+                            if v.fade <= 0.0 {
+                                return false;
+                            }
+                        }
                         let strip = &mixer.strips[v.strip];
                         if !strip.mute.load(Relaxed) {
                             // Equal-power pan.
@@ -170,6 +194,7 @@ struct DrumParams {
     noise: f32,
     noise_decay: f32,
     level: f32,
+    choke: Option<u8>,
 }
 
 fn default_pads() -> Vec<DrumParams> {
@@ -183,6 +208,7 @@ fn default_pads() -> Vec<DrumParams> {
         noise: 0.0,
         noise_decay: 0.1,
         level: 0.85,
+        choke: None,
     };
     vec![
         DrumParams {
@@ -218,6 +244,7 @@ fn default_pads() -> Vec<DrumParams> {
             noise: 1.0,
             noise_decay: 0.025,
             level: 0.4,
+            choke: Some(0),
             ..base
         },
         DrumParams {
@@ -227,6 +254,7 @@ fn default_pads() -> Vec<DrumParams> {
             noise: 1.0,
             noise_decay: 0.18,
             level: 0.4,
+            choke: Some(0),
             ..base
         },
         DrumParams {
@@ -264,7 +292,7 @@ const NOTES: [(&str, f32); 8] = [
 
 struct Desk {
     mixer: Arc<Mixer>,
-    tx: Sender<(usize, Vec<f32>)>,
+    tx: Sender<(usize, Vec<f32>, Option<u8>)>,
     _stream: cpal::Stream,
     rng: Rng,
 
@@ -292,12 +320,16 @@ impl Desk {
             noise_decay: p.noise_decay.max(0.005),
             level: p.level,
         };
-        let _ = self.tx.send((DRUMS, modal::render(&hit, &mut self.rng)));
+        let _ = self
+            .tx
+            .send((DRUMS, modal::render(&hit, &mut self.rng), p.choke));
     }
 
     fn pluck_note(&mut self, freq: f32) {
         let p = Pluck { freq, ..self.pluck };
-        let _ = self.tx.send((STRING, string::render(&p, &mut self.rng)));
+        let _ = self
+            .tx
+            .send((STRING, string::render(&p, &mut self.rng), None));
     }
 
     fn sing(&mut self, from: usize, to: usize) {
@@ -307,7 +339,9 @@ impl Desk {
             to: VOWELS[to].1,
             ..self.note
         };
-        let _ = self.tx.send((VOICE, voice::render(&n, &mut self.rng)));
+        let _ = self
+            .tx
+            .send((VOICE, voice::render(&n, &mut self.rng), None));
     }
 }
 
@@ -445,6 +479,10 @@ impl eframe::App for Desk {
                 slider(ui, &mut p.noise, 0.0..=1.0, false, "rattle");
                 slider(ui, &mut p.noise_decay, 0.01..=0.5, true, "rattle decay");
                 slider(ui, &mut p.level, 0.0..=1.0, false, "level");
+                let mut chokes = p.choke.is_some();
+                if ui.checkbox(&mut chokes, "choke group").changed() {
+                    p.choke = if chokes { Some(0) } else { None };
+                }
 
                 // ---- String.
                 let ui = &mut cols[1];
