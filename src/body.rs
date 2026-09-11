@@ -10,8 +10,9 @@
 //!
 //! The mode lists are plausible caricatures, not measurements: a guitar
 //! box with its ~100 Hz air resonance and wood modes, a violin with its
-//! A0 and the broad bridge hill, a drum shell, and a "plate" whose
-//! dense long-ringing modes act as a small metallic reverb.
+//! A0 and the broad bridge hill, a drum shell, and two "ringy" spaces —
+//! a plate and a cathedral — whose long-ringing modes act as modal
+//! reverbs (impulse-normalized so transients charge them; see PRESETS).
 
 use crate::util::SR;
 use std::f32::consts::{PI, TAU};
@@ -113,9 +114,10 @@ struct Res {
     b2: f32,
     g: f32,
     /// State-kick scale for knock(): starting the filter at y1 = kick
-    /// rings at ~the mode's gain. (An input impulse won't do: these are
-    /// normalized for steady-state gain, so their impulse response is
-    /// nearly silent — a resonator needs ~Q cycles of drive to build.)
+    /// rings at ~the mode's gain. (An input impulse won't do for the
+    /// peak-normalized tone-shaping bodies — their impulse response is
+    /// nearly silent, since a resonator needs ~Q cycles of drive to
+    /// build. Ringy bodies wouldn't need the kick, but share it.)
     kick: f32,
     y1: f32,
     y2: f32,

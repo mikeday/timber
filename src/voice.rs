@@ -85,7 +85,8 @@ impl Default for Note {
 
 /// Rosenberg glottal pulse: the fold opens smoothly, snaps shut, stays
 /// closed. The sharp closure is what gives the buzz its high harmonics.
-/// (Shared with the streaming mouth.)
+/// (voice::render uses it directly; the streaming engines get it via
+/// Glottis below.)
 pub(crate) fn glottal(p: f32) -> f32 {
     const OPEN: f32 = 0.6;
     const CLOSE: f32 = 0.15;
@@ -100,6 +101,74 @@ pub(crate) fn glottal(p: f32) -> f32 {
 
 fn lerp(a: f32, b: f32, t: f32) -> f32 {
     a + (b - a) * t
+}
+
+/// The humanized voice source shared by the streaming engines (mouth,
+/// tract): a gate envelope, vibrato that ramps in per phonation, pitch
+/// jitter and onset scoop, driving the Rosenberg pulse. The humanity
+/// lives in the imperfections — a machine-steady buzz reads as a
+/// raygun, not a larynx.
+pub struct Glottis {
+    phase: f32,
+    /// Vibrato LFO phase — wrapped each sample, so it cannot saturate
+    /// the way an ever-growing f32 time accumulator does (which stops
+    /// advancing entirely at t = 512 s).
+    vib_phase: f32,
+    /// Gate envelope, 0..1: callers scale their output by this.
+    pub amp: f32,
+    freq_s: f32,
+    was_gate: bool,
+    vib_t: f32,
+    onset: f32,
+    jitter: f32,
+}
+
+const G_ATTACK: f32 = 0.0015; // ~15 ms
+const G_RELEASE: f32 = 0.00028; // ~80 ms
+const G_SMOOTH: f32 = 0.002;
+
+impl Glottis {
+    pub fn new(freq: f32) -> Self {
+        Glottis {
+            phase: 0.0,
+            vib_phase: 0.0,
+            amp: 0.0,
+            freq_s: freq,
+            was_gate: false,
+            vib_t: 0.0,
+            onset: 0.0,
+            jitter: 0.0,
+        }
+    }
+
+    /// Advance one sample; returns the glottal pulse (0..1). Apply
+    /// `self.amp` to the final output.
+    pub fn tick(&mut self, freq: f32, vibrato: f32, gate: bool, rng: &mut Rng) -> f32 {
+        let (target, coeff) = if gate {
+            (1.0, G_ATTACK)
+        } else {
+            (0.0, G_RELEASE)
+        };
+        self.amp += coeff * (target - self.amp);
+        if gate && !self.was_gate {
+            self.vib_t = 0.0;
+            self.onset = 1.0;
+        }
+        self.was_gate = gate;
+        self.freq_s += G_SMOOTH * (freq - self.freq_s);
+        self.vib_t += 1.0 / SR;
+        self.vib_phase = (self.vib_phase + 5.3 / SR).fract();
+        // Vibrato ramps in over the phonation; jitter is slow random
+        // pitch drift no larynx can avoid (the one-pole passes √(c/2)
+        // of the drive: ~±0.4%); the onset scoop starts ~4% flat and
+        // settles over ~120 ms.
+        let vib = vibrato * (self.vib_t / 0.45).min(1.0) * (TAU * self.vib_phase).sin();
+        self.jitter += 0.0008 * (0.35 * rng.next() - self.jitter);
+        self.onset *= 0.99981;
+        let f = self.freq_s * (1.0 + vib + self.jitter - 0.04 * self.onset);
+        self.phase = (self.phase + f / SR).fract();
+        glottal(self.phase)
+    }
 }
 
 pub fn render(n: &Note, rng: &mut Rng) -> Vec<f32> {

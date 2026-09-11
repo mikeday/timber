@@ -189,7 +189,7 @@ impl Pad {
         self.impulse = 0.0;
         let n = self.p.modes.len().min(MAX_MODES);
         let choking = self.choking;
-        let mut run = |r: &mut Resonator| {
+        let run = |r: &mut Resonator| {
             let y = r.b1 * r.y1 - r.b2 * r.y2 + r.g * x;
             r.y2 = r.y1;
             r.y1 = y;

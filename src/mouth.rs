@@ -8,7 +8,7 @@
 //! *space*, not a list.
 
 use crate::util::{AtomicF32, Rng, SR};
-use crate::voice::glottal;
+use crate::voice::Glottis;
 use std::f32::consts::TAU;
 use std::sync::atomic::{AtomicBool, Ordering::Relaxed};
 
@@ -72,86 +72,39 @@ impl Params {
     }
 }
 
-/// ~15 ms attack, ~80 ms release.
-const ATTACK: f32 = 0.0015;
-const RELEASE: f32 = 0.00028;
-/// Formant/pitch smoothing (~11 ms), the same feel as the other models.
+/// Formant smoothing (~11 ms), the same feel as the other models.
 const SMOOTH: f32 = 0.002;
 
 pub struct Mouth {
-    phase: f32,
-    t: f32,
-    amp: f32,
-    freq_s: f32,
+    /// The shared humanized source (voice::Glottis) — one larynx
+    /// implementation for both streaming engines.
+    g: Glottis,
     f1_s: f32,
     f2_s: f32,
     res: [(f32, f32); 4],
-    // The humanity of the source lives in its imperfections: a machine-
-    // steady buzz reads as a raygun, not a larynx.
-    was_gate: bool,
-    /// Seconds since phonation began — vibrato ramps in over this.
-    vib_t: f32,
-    /// Onset scoop: phonation starts a little flat and settles.
-    onset: f32,
-    /// Slow random pitch drift (lowpassed noise), ~±0.5%.
-    jitter: f32,
 }
 
 impl Mouth {
     pub fn new() -> Self {
         Mouth {
-            phase: 0.0,
-            t: 0.0,
-            amp: 0.0,
-            freq_s: 165.0,
+            g: Glottis::new(165.0),
             f1_s: 730.0,
             f2_s: 1090.0,
             res: [(0.0, 0.0); 4],
-            was_gate: false,
-            vib_t: 0.0,
-            onset: 0.0,
-            jitter: 0.0,
         }
     }
 
     pub fn tick(&mut self, p: &Params, rng: &mut Rng) -> f32 {
-        let (target, coeff) = if p.gate {
-            (1.0, ATTACK)
-        } else {
-            (0.0, RELEASE)
-        };
-        self.amp += coeff * (target - self.amp);
-        if self.amp < 1e-4 && !p.gate {
+        let g = self.g.tick(p.freq, p.vibrato, p.gate, rng);
+        if self.g.amp < 1e-4 && !p.gate {
             return 0.0;
         }
 
-        if p.gate && !self.was_gate {
-            self.vib_t = 0.0;
-            self.onset = 1.0;
-        }
-        self.was_gate = p.gate;
-
-        self.freq_s += SMOOTH * (p.freq - self.freq_s);
         self.f1_s += SMOOTH * (p.f1 - self.f1_s);
         self.f2_s += SMOOTH * (p.f2 - self.f2_s);
 
-        self.t += 1.0 / SR;
-        self.vib_t += 1.0 / SR;
-        // Vibrato ramps in over the phonation — full-depth wobble from
-        // the first millisecond is the theremin/raygun signature.
-        let vib = p.vibrato * (self.vib_t / 0.45).min(1.0) * (TAU * 5.3 * self.t).sin();
-        // Jitter: slow random pitch drift no larynx can avoid. The
-        // drive looks large but the one-pole passes only √(c/2) of it:
-        // ~±0.4% of pitch comes out.
-        self.jitter += 0.0008 * (0.35 * rng.next() - self.jitter);
-        // Onset scoop: start ~4% flat, settle over ~120 ms.
-        self.onset *= 0.99981;
-        let f = self.freq_s * (1.0 + vib + self.jitter - 0.04 * self.onset);
-        self.phase = (self.phase + f / SR) % 1.0;
-
         // Aspiration pulses with the glottal cycle — air rushes while
         // the fold is open, not as a continuous hiss.
-        let g = glottal(self.phase);
         let src = g * (1.0 - p.breath) + rng.next() * p.breath * (0.3 + 0.7 * g);
 
         // Four formants: the two steered ones, and fixed F3/F4 for
@@ -170,7 +123,7 @@ impl Mouth {
             self.res[k] = (y, y1);
             sample += gain * y;
         }
-        sample * self.amp * p.level
+        sample * self.g.amp * p.level
     }
 }
 

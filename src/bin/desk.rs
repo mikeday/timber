@@ -9,10 +9,15 @@
 //! offline voice code. The mixer (gain, pan, mute, master with a tanh
 //! limiter) is always live.
 //!
-//! Keys: Z X C V B N = drums · A S D F G H J K = pluck strings (finger
-//! while bowing, melody while the mouth is held) · Q W E R T = vowels.
+//! The voice column runs one of two engines (checkbox): the formant
+//! mouth with its F1×F2 vowel plane, or the Kelly-Lochbaum tract with a
+//! tongue surface, a live tube-profile drawing, and a phoneme box that
+//! speaks through timber::speak.
+//!
+//! Keys: Z X C V B N M , . = drums (shift = roll) · A S D F G H J K =
+//! pluck strings (finger while bowing; melody while a voice engine is
+//! held or speaking) · Q W E R T = vowels (steer the held engine).
 //! Bow surface: hold, x-offset from center = speed, height = pressure.
-//! Mouth surface: hold to phonate, position = vowel (F2 × F1).
 
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering::Relaxed};
 use std::sync::mpsc::{Receiver, Sender, channel};
@@ -23,7 +28,7 @@ use eframe::egui;
 
 use timber::util::{AtomicF32, Rng, SR};
 use timber::voice::{self, Note, Vowel};
-use timber::{body, drums, modal, mouth, stream};
+use timber::{body, drums, modal, mouth, speak, stream, tract};
 
 // ---- Lock-free mixer state shared with the audio thread -----------------
 
@@ -64,6 +69,8 @@ enum Msg {
     Knock(usize),
     /// Hold-to-roll on a drum pad: on while the key is held.
     Roll(usize, bool),
+    /// Speak a phoneme sequence through the tract.
+    Speak(Vec<speak::Seg>),
 }
 
 // ---- Audio thread --------------------------------------------------------
@@ -85,6 +92,7 @@ fn start_audio(
     mixer: Arc<Mixer>,
     ctl: Arc<stream::Ctl>,
     mouth_ctl: Arc<mouth::Ctl>,
+    tract_ctl: Arc<tract::Ctl>,
     scope: Arc<Mutex<Vec<f32>>>,
     rx: Receiver<Msg>,
     string_freqs: Vec<f32>,
@@ -111,6 +119,8 @@ fn start_audio(
     let mut bank = stream::Bank::new(&string_freqs);
     let mut kit = drums::Kit::new(pads);
     let mut mouth = mouth::Mouth::new();
+    let mut tube = tract::Tract::new();
+    let mut utter: Option<speak::Utterance> = None;
     // One body instance per (strip, preset); the strip's atomic picks
     // which one the signal passes through.
     let mut bodies: Vec<Vec<body::Body>> = (0..3)
@@ -129,12 +139,14 @@ fn start_audio(
             move |data: &mut [f32], _| {
                 let p = stream::Params::read(&ctl);
                 let mp = mouth::Params::read(&mouth_ctl);
+                let tp = tract::Params::read(&tract_ctl);
                 while let Ok(msg) = rx.try_recv() {
                     match msg {
                         Msg::Pluck(i) => bank.pluck(i, ctl.pluck_pos.get(), &mut rng),
                         Msg::Strike(i) => kit.strike(i),
                         Msg::Pad(i, params) => kit.set_params(i, params),
                         Msg::Roll(i, on) => kit.set_roll(i, on),
+                        Msg::Speak(segs) => utter = speak::Utterance::new(segs),
                         Msg::Knock(i) => {
                             let sel = mixer.strips[i].body.load(Relaxed).min(bodies[i].len() - 1);
                             if sel > 0 {
@@ -195,6 +207,19 @@ fn start_audio(
                     sums[STRING] += bank.tick(&p);
                     sums[DRUMS] += kit.tick(&mut rng);
                     sums[VOICE] += mouth.tick(&mp, &mut rng);
+                    // A running utterance overrides the pad's
+                    // articulation; pitch/level stay live. Release
+                    // semantics live in the engine (articulation holds
+                    // while the gate is off), so the fallback is clean.
+                    let p_use = match utter.as_mut().and_then(|u| u.step(&tp)) {
+                        Some(sp) => sp,
+                        None => {
+                            utter = None;
+                            tp
+                        }
+                    };
+                    tract_ctl.speaking.store(utter.is_some(), Relaxed);
+                    sums[VOICE] += tube.tick(&p_use, &mut rng);
 
                     let (mut l, mut r) = (0.0f32, 0.0f32);
                     for (i, strip) in mixer.strips.iter().enumerate() {
@@ -464,6 +489,9 @@ struct Desk {
     mixer: Arc<Mixer>,
     ctl: Arc<stream::Ctl>,
     mouth: Arc<mouth::Ctl>,
+    tract: Arc<tract::Ctl>,
+    tract_mode: bool,
+    phrase: String,
     scope: Arc<Mutex<Vec<f32>>>,
     tx: Sender<Msg>,
     _stream: cpal::Stream,
@@ -556,7 +584,20 @@ impl eframe::App for Desk {
         // matched on the physical key where available so shift and
         // layout can't reroute a held pad key.
         let mut acts: Vec<(usize, usize)> = Vec::new(); // (kind, index)
+        let typing = ctx.wants_keyboard_input();
         ctx.input(|i| {
+            if typing {
+                // A focused text field owns the keyboard: no plucks,
+                // strikes or rolls while spelling out phonemes.
+                self.drum_down = [false; NPADS];
+                for k in 0..NPADS {
+                    if self.rolling[k] {
+                        self.rolling[k] = false;
+                        let _ = self.tx.send(Msg::Roll(k, false));
+                    }
+                }
+                return;
+            }
             for ev in &i.events {
                 let egui::Event::Key {
                     key,
@@ -602,13 +643,22 @@ impl eframe::App for Desk {
                 1 if self.ctl.bow_on.load(Relaxed) => {
                     self.ctl.bow_string.store(k, Relaxed);
                 }
-                // While the mouth is held, note keys re-pitch the voice
+                // While a voice engine is held, note keys re-pitch it
                 // (the surface hand steers vowels, this hand melody).
+                1 if self.tract.gate.load(Relaxed) || self.tract.speaking.load(Relaxed) => {
+                    self.voice_freq = NOTES[k].1
+                }
                 1 if self.mouth.gate.load(Relaxed) => self.voice_freq = NOTES[k].1,
                 1 => self.pluck(k),
-                // While the mouth is held, vowel keys steer it — snap
-                // the formants to that vowel (the smoothing glides
-                // there) instead of layering a second one-shot voice.
+                // While a voice engine is held, vowel keys steer it —
+                // snap to that vowel's articulation (the smoothing
+                // glides there) instead of layering a one-shot voice.
+                _ if self.tract.gate.load(Relaxed) => {
+                    let (_, tp, con, lips) = tract::VOWELS[k];
+                    self.tract.tongue_pos.set(tp);
+                    self.tract.constrict.set(con);
+                    self.tract.lips.set(lips);
+                }
                 _ if self.mouth.gate.load(Relaxed) => {
                     let v = &VOWELS[k].1;
                     self.mouth.f1.set(v.0[0].0);
@@ -732,10 +782,12 @@ impl eframe::App for Desk {
                             edited |= ui.selectable_value(&mut p.modes, m, m.name()).changed();
                         }
                     });
-                // Range must contain every pad's default: egui clamps an
-                // out-of-range value the moment the slider is shown, the
-                // change-detector reads that as an edit, and the pad gets
-                // silently retuned (the triangle's one-time "mwup").
+                // Range must still contain every pad's default: egui
+                // clamps an out-of-range value on display, silently
+                // mutating the stored param (shipped on the next real
+                // edit). The Response-based `edited` flag keeps the
+                // clamp itself from *triggering* a send — the original
+                // "mwup" bug — but not from corrupting the value.
                 edited |= slider(ui, &mut p.freq, 25.0..=2400.0, true, "freq");
                 edited |= slider(ui, &mut p.glide, 0.0..=1.5, false, "pitch glide");
                 edited |= slider(ui, &mut p.glide_time, 0.01..=0.5, true, "glide time");
@@ -890,63 +942,168 @@ impl eframe::App for Desk {
                 self.mouth.breath.set(self.note.breath);
                 self.mouth.vibrato.set(self.note.vibrato);
                 self.mouth.level.set(self.note.level);
+                self.tract.freq.set(self.voice_freq);
+                self.tract.breath.set(self.note.breath);
+                self.tract.vibrato.set(self.note.vibrato);
+                self.tract.level.set(self.note.level);
                 ui.separator();
-
-                // ---- The mouth: hold to phonate, steer through the
-                // phonetician's vowel plane — left/right is tongue
-                // position (F2, front vowels left), up/down is jaw
-                // openness (F1). The named vowels are landmarks in a
-                // continuous space, not the only options.
-                ui.label("mouth — hold to sing, drag between vowels");
-                let h = 80.0;
-                let (rect, resp) = ui
-                    .allocate_exact_size(egui::vec2(ui.available_width(), h), egui::Sense::drag());
-                let painter = ui.painter_at(rect);
-                painter.rect_filled(rect, 4.0, ui.visuals().extreme_bg_color);
-                let (f1_lo, f1_hi) = mouth::F1_RANGE;
-                let (f2_lo, f2_hi) = mouth::F2_RANGE;
-                let to_pos = |f1: f32, f2: f32| {
-                    egui::pos2(
-                        rect.left() + rect.width() * (f2_hi / f2).ln() / (f2_hi / f2_lo).ln(),
-                        rect.top() + rect.height() * (f1 / f1_lo).ln() / (f1_hi / f1_lo).ln(),
-                    )
-                };
-                for (name, v) in &VOWELS {
-                    let (f1, _, _) = v.0[0];
-                    let (f2, _, _) = v.0[1];
-                    painter.text(
-                        to_pos(f1, f2),
-                        egui::Align2::CENTER_CENTER,
-                        *name,
-                        egui::FontId::proportional(12.0),
-                        ui.visuals().weak_text_color(),
-                    );
-                }
-                if (resp.dragged() || resp.is_pointer_button_down_on())
-                    && let Some(pos) = resp.interact_pointer_pos()
-                {
-                    // Only a *moving* pointer writes the vowel, so the
-                    // Q..T keys can set formants without the resting
-                    // finger instantly overwriting them.
-                    if self.last_mouth_pos.is_none_or(|p| p.distance(pos) > 1.0) {
-                        self.last_mouth_pos = Some(pos);
-                        let x = ((pos.x - rect.left()) / rect.width()).clamp(0.0, 1.0);
-                        let y = ((pos.y - rect.top()) / rect.height()).clamp(0.0, 1.0);
-                        self.mouth.f2.set(f2_hi * (f2_lo / f2_hi).powf(x));
-                        self.mouth.f1.set(f1_lo * (f1_hi / f1_lo).powf(y));
-                    }
-                    self.mouth.gate.store(true, Relaxed);
-                    // The marker shows the *actual* formants — pointer
-                    // and key agree on one source of truth.
-                    let marker = to_pos(self.mouth.f1.get(), self.mouth.f2.get());
-                    painter.circle_filled(
-                        marker.clamp(rect.min, rect.max),
-                        4.0,
-                        egui::Color32::from_rgb(255, 180, 90),
-                    );
-                } else {
+                let was_tract = self.tract_mode;
+                ui.checkbox(&mut self.tract_mode, "tract engine (Kelly-Lochbaum)");
+                if was_tract != self.tract_mode {
                     self.mouth.gate.store(false, Relaxed);
+                    self.tract.gate.store(false, Relaxed);
                     self.last_mouth_pos = None;
+                    // An empty utterance stops any running speech — the
+                    // hidden engine must not keep talking.
+                    let _ = self.tx.send(Msg::Speak(Vec::new()));
+                }
+                if self.tract_mode {
+                    // ---- The tract: a tube you sculpt. Drag = tongue
+                    // (x along the mouth, y toward closure); the drawn
+                    // profile IS the tube the audio thread scatters
+                    // through. The pad's range stays below frication
+                    // (a tongue can't sustain a gas jet) — consonants
+                    // belong to the phoneme box.
+                    ctl_slider(ui, &self.tract.lips, 0.0..=1.0, false, "lips");
+                    // Nasalized vowels on demand: hold a vowel and open
+                    // the nose.
+                    ctl_slider(ui, &self.tract.velum, 0.0..=1.0, false, "velum");
+                    ui.horizontal(|ui| {
+                        if ui.button("speak").clicked() {
+                            let segs = speak::phrase(&self.phrase);
+                            if !segs.is_empty() {
+                                let _ = self.tx.send(Msg::Speak(segs));
+                            }
+                        }
+                        ui.add(
+                            egui::TextEdit::singleline(&mut self.phrase)
+                                .desired_width(ui.available_width()),
+                        )
+                        .on_hover_text(
+                            "phonemes: a e i o u w y h l r s sh f z p b t d k g, '.' pause",
+                        );
+                    });
+                    ui.label("tract — hold to sing: ⇄ tongue back/front, ↓ raise tongue");
+                    // The pad maps onto constriction 0..CONSTRICT_MAX:
+                    // a tongue can press to frication, but not sustain
+                    // the pinhole gas-jet regime beyond it — that zone
+                    // is clamped out of the UI, not out of the model.
+                    const CONSTRICT_MAX: f32 = 0.87;
+                    let h = 80.0;
+                    let (rect, resp) = ui.allocate_exact_size(
+                        egui::vec2(ui.available_width(), h),
+                        egui::Sense::drag(),
+                    );
+                    let painter = ui.painter_at(rect);
+                    painter.rect_filled(rect, 4.0, ui.visuals().extreme_bg_color);
+                    let d = tract::diameters(
+                        self.tract.tongue_pos.get(),
+                        self.tract.constrict.get(),
+                        self.tract.lips.get(),
+                        0.0,
+                    );
+                    let mut top = Vec::with_capacity(tract::N);
+                    let mut bot = Vec::with_capacity(tract::N);
+                    for (i, di) in d.iter().enumerate() {
+                        let x = rect.left() + rect.width() * i as f32 / (tract::N - 1) as f32;
+                        let half = di / 1.6 * (h * 0.42);
+                        top.push(egui::pos2(x, rect.center().y - half));
+                        bot.push(egui::pos2(x, rect.center().y + half));
+                    }
+                    let stroke = egui::Stroke::new(1.5, egui::Color32::from_rgb(130, 190, 255));
+                    painter.add(egui::Shape::line(top, stroke));
+                    painter.add(egui::Shape::line(bot, stroke));
+                    for (name, tp, con, _) in tract::VOWELS {
+                        painter.text(
+                            egui::pos2(
+                                rect.left() + rect.width() * tp,
+                                rect.top() + h * con / CONSTRICT_MAX,
+                            ),
+                            egui::Align2::CENTER_CENTER,
+                            name,
+                            egui::FontId::proportional(11.0),
+                            ui.visuals().weak_text_color(),
+                        );
+                    }
+                    if (resp.dragged() || resp.is_pointer_button_down_on())
+                        && let Some(pos) = resp.interact_pointer_pos()
+                    {
+                        if self.last_mouth_pos.is_none_or(|p| p.distance(pos) > 1.0) {
+                            self.last_mouth_pos = Some(pos);
+                            let x = ((pos.x - rect.left()) / rect.width()).clamp(0.0, 1.0);
+                            let y = ((pos.y - rect.top()) / h).clamp(0.0, 1.0);
+                            self.tract.tongue_pos.set(x);
+                            self.tract.constrict.set(y * CONSTRICT_MAX);
+                        }
+                        self.tract.gate.store(true, Relaxed);
+                        let marker = egui::pos2(
+                            rect.left() + rect.width() * self.tract.tongue_pos.get(),
+                            rect.top() + h * self.tract.constrict.get() / CONSTRICT_MAX,
+                        );
+                        painter.circle_filled(marker, 4.0, egui::Color32::from_rgb(255, 180, 90));
+                    } else {
+                        self.tract.gate.store(false, Relaxed);
+                        self.last_mouth_pos = None;
+                    }
+                } else {
+                    // ---- The mouth: hold to phonate, steer through the
+                    // phonetician's vowel plane — left/right is tongue
+                    // position (F2, front vowels left), up/down is jaw
+                    // openness (F1). The named vowels are landmarks in a
+                    // continuous space, not the only options.
+                    ui.label("mouth — hold to sing, drag between vowels");
+                    let h = 80.0;
+                    let (rect, resp) = ui.allocate_exact_size(
+                        egui::vec2(ui.available_width(), h),
+                        egui::Sense::drag(),
+                    );
+                    let painter = ui.painter_at(rect);
+                    painter.rect_filled(rect, 4.0, ui.visuals().extreme_bg_color);
+                    let (f1_lo, f1_hi) = mouth::F1_RANGE;
+                    let (f2_lo, f2_hi) = mouth::F2_RANGE;
+                    let to_pos = |f1: f32, f2: f32| {
+                        egui::pos2(
+                            rect.left() + rect.width() * (f2_hi / f2).ln() / (f2_hi / f2_lo).ln(),
+                            rect.top() + rect.height() * (f1 / f1_lo).ln() / (f1_hi / f1_lo).ln(),
+                        )
+                    };
+                    for (name, v) in &VOWELS {
+                        let (f1, _, _) = v.0[0];
+                        let (f2, _, _) = v.0[1];
+                        painter.text(
+                            to_pos(f1, f2),
+                            egui::Align2::CENTER_CENTER,
+                            *name,
+                            egui::FontId::proportional(12.0),
+                            ui.visuals().weak_text_color(),
+                        );
+                    }
+                    if (resp.dragged() || resp.is_pointer_button_down_on())
+                        && let Some(pos) = resp.interact_pointer_pos()
+                    {
+                        // Only a *moving* pointer writes the vowel, so the
+                        // Q..T keys can set formants without the resting
+                        // finger instantly overwriting them.
+                        if self.last_mouth_pos.is_none_or(|p| p.distance(pos) > 1.0) {
+                            self.last_mouth_pos = Some(pos);
+                            let x = ((pos.x - rect.left()) / rect.width()).clamp(0.0, 1.0);
+                            let y = ((pos.y - rect.top()) / rect.height()).clamp(0.0, 1.0);
+                            self.mouth.f2.set(f2_hi * (f2_lo / f2_hi).powf(x));
+                            self.mouth.f1.set(f1_lo * (f1_hi / f1_lo).powf(y));
+                        }
+                        self.mouth.gate.store(true, Relaxed);
+                        // The marker shows the *actual* formants — pointer
+                        // and key agree on one source of truth.
+                        let marker = to_pos(self.mouth.f1.get(), self.mouth.f2.get());
+                        painter.circle_filled(
+                            marker.clamp(rect.min, rect.max),
+                            4.0,
+                            egui::Color32::from_rgb(255, 180, 90),
+                        );
+                    } else {
+                        self.mouth.gate.store(false, Relaxed);
+                        self.last_mouth_pos = None;
+                    }
                 }
             });
         });
@@ -961,7 +1118,7 @@ fn main() -> eframe::Result {
         body::PRESETS
             .iter()
             .position(|(n, _, _)| *n == name)
-            .expect("unknown body preset") as usize
+            .expect("unknown body preset")
     };
     let mixer = Arc::new(Mixer {
         strips: [
@@ -991,6 +1148,7 @@ fn main() -> eframe::Result {
     });
     let ctl = Arc::new(stream::Ctl::new());
     let mouth_ctl = Arc::new(mouth::Ctl::new());
+    let tract_ctl = Arc::new(tract::Ctl::new());
     let scope = Arc::new(Mutex::new(vec![0.0f32; SCOPE_LEN]));
     let (tx, rx) = channel();
     let freqs = NOTES.iter().map(|(_, f)| *f).collect();
@@ -1000,6 +1158,7 @@ fn main() -> eframe::Result {
         mixer.clone(),
         ctl.clone(),
         mouth_ctl.clone(),
+        tract_ctl.clone(),
         scope.clone(),
         rx,
         freqs,
@@ -1010,6 +1169,9 @@ fn main() -> eframe::Result {
         mixer,
         ctl,
         mouth: mouth_ctl,
+        tract: tract_ctl,
+        tract_mode: false,
+        phrase: "h e l o . w a w".into(),
         scope,
         tx,
         _stream: stream,
