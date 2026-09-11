@@ -5,6 +5,7 @@
 //!   modal:  strike       → bank of ringing modes (modal.rs)
 //!   voice:  glottal buzz → moving formant modes  (voice.rs)
 
+pub mod body;
 pub mod drums;
 pub mod modal;
 pub mod mouth;

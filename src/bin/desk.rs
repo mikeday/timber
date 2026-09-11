@@ -14,7 +14,7 @@
 //! Bow surface: hold, x-offset from center = speed, height = pressure.
 //! Mouth surface: hold to phonate, position = vowel (F2 × F1).
 
-use std::sync::atomic::{AtomicBool, Ordering::Relaxed};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering::Relaxed};
 use std::sync::mpsc::{Receiver, Sender, channel};
 use std::sync::{Arc, Mutex};
 
@@ -23,7 +23,7 @@ use eframe::egui;
 
 use timber::util::{AtomicF32, Rng, SR};
 use timber::voice::{self, Note, Vowel};
-use timber::{drums, modal, mouth, stream};
+use timber::{body, drums, modal, mouth, stream};
 
 // ---- Lock-free mixer state shared with the audio thread -----------------
 
@@ -31,6 +31,9 @@ struct Strip {
     gain: AtomicF32,
     pan: AtomicF32, // -1..1
     mute: AtomicBool,
+    /// Index into body::PRESETS.
+    body: AtomicUsize,
+    body_wet: AtomicF32,
 }
 
 struct Mixer {
@@ -56,6 +59,9 @@ enum Msg {
     /// A pad's parameters changed — the ringing state carries on under
     /// the new settings.
     Pad(usize, drums::PadParams),
+    /// Rap a knuckle on a strip's body: an impulse through the body
+    /// filter alone, to hear the box itself.
+    Knock(usize),
 }
 
 // ---- Audio thread --------------------------------------------------------
@@ -103,6 +109,16 @@ fn start_audio(
     let mut bank = stream::Bank::new(&string_freqs);
     let mut kit = drums::Kit::new(pads);
     let mut mouth = mouth::Mouth::new();
+    // One body instance per (strip, preset); the strip's atomic picks
+    // which one the signal passes through.
+    let mut bodies: Vec<Vec<body::Body>> = (0..3)
+        .map(|_| {
+            body::PRESETS
+                .iter()
+                .map(|(_, m)| body::Body::new(m))
+                .collect()
+        })
+        .collect();
     let mut rng = Rng(0x626f7765);
     let mut voices: Vec<PlayVoice> = Vec::new();
     let stream = device
@@ -116,6 +132,12 @@ fn start_audio(
                         Msg::Pluck(i) => bank.pluck(i, ctl.pluck_pos.get(), &mut rng),
                         Msg::Strike(i) => kit.strike(i),
                         Msg::Pad(i, params) => kit.set_params(i, params),
+                        Msg::Knock(i) => {
+                            let sel = mixer.strips[i].body.load(Relaxed).min(bodies[i].len() - 1);
+                            if sel > 0 {
+                                bodies[i][sel].knock(0.8);
+                            }
+                        }
                         Msg::Buffer(strip, buf, choke) => {
                             if let Some(group) = choke {
                                 for v in voices.iter_mut() {
@@ -147,16 +169,9 @@ fn start_audio(
                     }
                 }
                 for frame in data.chunks_mut(channels) {
-                    let (mut l, mut r) = (0.0f32, 0.0f32);
-                    let mut route = |s: f32, strip: &Strip| {
-                        if !strip.mute.load(Relaxed) {
-                            // Equal-power pan.
-                            let a = (strip.pan.get() + 1.0) * std::f32::consts::FRAC_PI_4;
-                            let g = strip.gain.get() * s;
-                            l += g * a.cos();
-                            r += g * a.sin();
-                        }
-                    };
+                    // Sum each strip dry first: the body must see the
+                    // strip's whole signal once, not each voice.
+                    let mut sums = [0.0f32; 3];
                     voices.retain_mut(|v| {
                         let i = v.pos as usize;
                         if i + 1 >= v.buf.len() {
@@ -171,12 +186,34 @@ fn start_audio(
                                 return false;
                             }
                         }
-                        route(s, &mixer.strips[v.strip]);
+                        sums[v.strip] += s;
                         true
                     });
-                    route(bank.tick(&p), &mixer.strips[STRING]);
-                    route(kit.tick(&mut rng), &mixer.strips[DRUMS]);
-                    route(mouth.tick(&mp, &mut rng), &mixer.strips[VOICE]);
+                    sums[STRING] += bank.tick(&p);
+                    sums[DRUMS] += kit.tick(&mut rng);
+                    sums[VOICE] += mouth.tick(&mp, &mut rng);
+
+                    let (mut l, mut r) = (0.0f32, 0.0f32);
+                    for (i, strip) in mixer.strips.iter().enumerate() {
+                        let mut s = sums[i];
+                        let sel = strip.body.load(Relaxed).min(bodies[i].len() - 1);
+                        if sel > 0 {
+                            // Dry↔body crossfade. Full wet is the
+                            // physically honest case: a bare string
+                            // moves almost no air — in reality you only
+                            // ever hear the box.
+                            let wet = strip.body_wet.get();
+                            let boxed = bodies[i][sel].tick(sums[i]);
+                            s = s * (1.0 - wet) + boxed * wet;
+                        }
+                        if !strip.mute.load(Relaxed) {
+                            // Equal-power pan.
+                            let a = (strip.pan.get() + 1.0) * std::f32::consts::FRAC_PI_4;
+                            let g = strip.gain.get() * s;
+                            l += g * a.cos();
+                            r += g * a.sin();
+                        }
+                    }
                     let m = mixer.master.get();
                     frame[0] = (l * m).tanh();
                     if channels > 1 {
@@ -537,6 +574,36 @@ impl eframe::App for Desk {
                 });
             });
             ui.separator();
+            ui.label("bodies");
+            for (i, strip) in self.mixer.strips.iter().enumerate() {
+                ui.horizontal(|ui| {
+                    let mut sel = strip.body.load(Relaxed).min(body::PRESETS.len() - 1);
+                    egui::ComboBox::from_id_salt(("body", i))
+                        .width(70.0)
+                        .selected_text(body::PRESETS[sel].0)
+                        .show_ui(ui, |ui| {
+                            for (k, (name, _)) in body::PRESETS.iter().enumerate() {
+                                ui.selectable_value(&mut sel, k, *name);
+                            }
+                        });
+                    strip.body.store(sel, Relaxed);
+                    let mut wet = strip.body_wet.get();
+                    if ui
+                        .add(
+                            egui::Slider::new(&mut wet, 0.0..=1.0)
+                                .show_value(false)
+                                .text(STRIP_NAMES[i]),
+                        )
+                        .changed()
+                    {
+                        strip.body_wet.set(wet);
+                    }
+                    if ui.small_button("knock").clicked() {
+                        let _ = self.tx.send(Msg::Knock(i));
+                    }
+                });
+            }
+            ui.separator();
             ui.small("Z X C V B N — drums");
             ui.small("A S D F G H J K — pluck (finger, while bowing)");
             ui.small("Q W E R T — vowels");
@@ -769,22 +836,30 @@ impl eframe::App for Desk {
 }
 
 fn main() -> eframe::Result {
+    // Body preset indices follow body::PRESETS order:
+    // 0 none · 1 guitar · 2 violin · 3 shell · 4 plate.
     let mixer = Arc::new(Mixer {
         strips: [
             Strip {
                 gain: AtomicF32::new(0.9),
                 pan: AtomicF32::new(0.0),
                 mute: AtomicBool::new(false),
+                body: AtomicUsize::new(3),
+                body_wet: AtomicF32::new(0.4),
             },
             Strip {
                 gain: AtomicF32::new(0.7),
                 pan: AtomicF32::new(0.0),
                 mute: AtomicBool::new(false),
+                body: AtomicUsize::new(1),
+                body_wet: AtomicF32::new(0.5),
             },
             Strip {
                 gain: AtomicF32::new(0.8),
                 pan: AtomicF32::new(0.0),
                 mute: AtomicBool::new(false),
+                body: AtomicUsize::new(4),
+                body_wet: AtomicF32::new(0.3),
             },
         ],
         master: AtomicF32::new(0.8),
