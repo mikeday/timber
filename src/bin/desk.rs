@@ -62,6 +62,8 @@ enum Msg {
     /// Rap a knuckle on a strip's body: an impulse through the body
     /// filter alone, to hear the box itself.
     Knock(usize),
+    /// Hold-to-roll on a drum pad: on while the key is held.
+    Roll(usize, bool),
 }
 
 // ---- Audio thread --------------------------------------------------------
@@ -115,7 +117,7 @@ fn start_audio(
         .map(|_| {
             body::PRESETS
                 .iter()
-                .map(|(_, m)| body::Body::new(m))
+                .map(|(_, m, ringy)| body::Body::new(m, *ringy))
                 .collect()
         })
         .collect();
@@ -132,6 +134,7 @@ fn start_audio(
                         Msg::Pluck(i) => bank.pluck(i, ctl.pluck_pos.get(), &mut rng),
                         Msg::Strike(i) => kit.strike(i),
                         Msg::Pad(i, params) => kit.set_params(i, params),
+                        Msg::Roll(i, on) => kit.set_roll(i, on),
                         Msg::Knock(i) => {
                             let sel = mixer.strips[i].body.load(Relaxed).min(bodies[i].len() - 1);
                             if sel > 0 {
@@ -242,6 +245,7 @@ enum ModeSet {
     Membrane,
     Center,
     Bell,
+    Triangle,
     NoiseOnly,
 }
 
@@ -251,6 +255,7 @@ impl ModeSet {
             ModeSet::Membrane => modal::MEMBRANE,
             ModeSet::Center => modal::MEMBRANE_CENTER,
             ModeSet::Bell => modal::BELL,
+            ModeSet::Triangle => modal::TRIANGLE,
             ModeSet::NoiseOnly => &[],
         }
     }
@@ -259,6 +264,7 @@ impl ModeSet {
             ModeSet::Membrane => "membrane",
             ModeSet::Center => "membrane (center hit)",
             ModeSet::Bell => "bell",
+            ModeSet::Triangle => "triangle (rod)",
             ModeSet::NoiseOnly => "noise only",
         }
     }
@@ -275,6 +281,7 @@ struct DrumParams {
     noise: f32,
     noise_decay: f32,
     drive: f32,
+    shimmer: f32,
     level: f32,
     choke: Option<u8>,
 }
@@ -290,6 +297,7 @@ impl DrumParams {
             noise: self.noise,
             noise_decay: self.noise_decay,
             drive: self.drive,
+            shimmer: self.shimmer,
             level: self.level,
             choke: self.choke,
         }
@@ -307,6 +315,7 @@ fn default_pads() -> Vec<DrumParams> {
         noise: 0.0,
         noise_decay: 0.1,
         drive: 0.0,
+        shimmer: 0.0,
         level: 0.85,
         choke: None,
     };
@@ -337,8 +346,22 @@ fn default_pads() -> Vec<DrumParams> {
             ..base
         },
         DrumParams {
+            name: "tom hi",
+            freq: 155.0,
+            glide: 0.25,
+            glide_time: 0.12,
+            ..base
+        },
+        DrumParams {
             name: "tom",
             freq: 110.0,
+            glide: 0.25,
+            glide_time: 0.12,
+            ..base
+        },
+        DrumParams {
+            name: "tom lo",
+            freq: 80.0,
             glide: 0.25,
             glide_time: 0.12,
             ..base
@@ -366,6 +389,16 @@ fn default_pads() -> Vec<DrumParams> {
             modes: ModeSet::Bell,
             freq: 440.0,
             level: 0.6,
+            ..base
+        },
+        // The strike's contact click is a whisper of very fast rattle.
+        DrumParams {
+            name: "triangle",
+            modes: ModeSet::Triangle,
+            freq: 1180.0,
+            noise: 0.04,
+            noise_decay: 0.002,
+            level: 0.5,
             ..base
         },
     ]
@@ -404,6 +437,8 @@ struct Desk {
 
     pads: Vec<DrumParams>,
     pad_sel: usize,
+    rolling: [bool; 9],
+    last_mouth_pos: Option<egui::Pos2>,
 
     note: Note,
     from_vowel: usize,
@@ -482,7 +517,17 @@ impl eframe::App for Desk {
 
         // ---- Keyboard: collect first, act after, to keep borrows simple.
         use egui::Key;
-        const DRUM_KEYS: [Key; 6] = [Key::Z, Key::X, Key::C, Key::V, Key::B, Key::N];
+        const DRUM_KEYS: [Key; 9] = [
+            Key::Z,
+            Key::X,
+            Key::C,
+            Key::V,
+            Key::B,
+            Key::N,
+            Key::M,
+            Key::Comma,
+            Key::Period,
+        ];
         const NOTE_KEYS: [Key; 8] = [
             Key::A,
             Key::S,
@@ -517,6 +562,17 @@ impl eframe::App for Desk {
                 }
             }
         });
+        // Shift+drum-key held = roll; a plain press stays a clean
+        // single hit.
+        ctx.input(|i| {
+            for (k, key) in DRUM_KEYS.iter().enumerate() {
+                let down = i.key_down(*key) && i.modifiers.shift;
+                if down != self.rolling[k] {
+                    self.rolling[k] = down;
+                    let _ = self.tx.send(Msg::Roll(k, down));
+                }
+            }
+        });
         for (kind, k) in acts {
             match kind {
                 0 => self.strike(k),
@@ -531,6 +587,14 @@ impl eframe::App for Desk {
                 // (the surface hand steers vowels, this hand melody).
                 1 if self.mouth.gate.load(Relaxed) => self.voice_freq = NOTES[k].1,
                 1 => self.pluck(k),
+                // While the mouth is held, vowel keys steer it — snap
+                // the formants to that vowel (the smoothing glides
+                // there) instead of layering a second one-shot voice.
+                _ if self.mouth.gate.load(Relaxed) => {
+                    let v = &VOWELS[k].1;
+                    self.mouth.f1.set(v.0[0].0);
+                    self.mouth.f2.set(v.0[1].0);
+                }
                 _ => self.sing(k, k),
             }
         }
@@ -583,7 +647,7 @@ impl eframe::App for Desk {
                         .width(70.0)
                         .selected_text(body::PRESETS[sel].0)
                         .show_ui(ui, |ui| {
-                            for (k, (name, _)) in body::PRESETS.iter().enumerate() {
+                            for (k, (name, _, _)) in body::PRESETS.iter().enumerate() {
                                 ui.selectable_value(&mut sel, k, *name);
                             }
                         });
@@ -605,7 +669,7 @@ impl eframe::App for Desk {
                 });
             }
             ui.separator();
-            ui.small("Z X C V B N — drums");
+            ui.small("Z X C V B N M , . — drums (shift = roll)");
             ui.small("A S D F G H J K — pluck (finger, while bowing)");
             ui.small("Q W E R T — vowels");
             ui.small("hold bow surface — bow");
@@ -640,18 +704,26 @@ impl eframe::App for Desk {
                             ModeSet::Membrane,
                             ModeSet::Center,
                             ModeSet::Bell,
+                            ModeSet::Triangle,
                             ModeSet::NoiseOnly,
                         ] {
                             ui.selectable_value(&mut p.modes, m, m.name());
                         }
                     });
-                slider(ui, &mut p.freq, 25.0..=880.0, true, "freq");
+                // Range must contain every pad's default: egui clamps an
+                // out-of-range value the moment the slider is shown, the
+                // change-detector reads that as an edit, and the pad gets
+                // silently retuned (the triangle's one-time "mwup").
+                slider(ui, &mut p.freq, 25.0..=2400.0, true, "freq");
                 slider(ui, &mut p.glide, 0.0..=1.5, false, "pitch glide");
                 slider(ui, &mut p.glide_time, 0.01..=0.5, true, "glide time");
-                slider(ui, &mut p.damp, 0.1..=3.0, true, "muffle");
+                // Floor low enough to be a hand grabbing the metal: at
+                // 0.02 a six-second triangle mode dies in ~0.1s.
+                slider(ui, &mut p.damp, 0.02..=3.0, true, "muffle");
                 slider(ui, &mut p.noise, 0.0..=1.0, false, "rattle");
                 slider(ui, &mut p.noise_decay, 0.002..=0.5, true, "rattle decay");
                 slider(ui, &mut p.drive, 0.0..=6.0, false, "drive");
+                slider(ui, &mut p.shimmer, 0.0..=1.0, false, "shimmer");
                 slider(ui, &mut p.level, 0.0..=1.0, false, "level");
                 let mut chokes = p.choke.is_some();
                 if ui.checkbox(&mut chokes, "choke group").changed() {
@@ -830,18 +902,28 @@ impl eframe::App for Desk {
                 if (resp.dragged() || resp.is_pointer_button_down_on())
                     && let Some(pos) = resp.interact_pointer_pos()
                 {
-                    let x = ((pos.x - rect.left()) / rect.width()).clamp(0.0, 1.0);
-                    let y = ((pos.y - rect.top()) / rect.height()).clamp(0.0, 1.0);
-                    self.mouth.f2.set(f2_hi * (f2_lo / f2_hi).powf(x));
-                    self.mouth.f1.set(f1_lo * (f1_hi / f1_lo).powf(y));
+                    // Only a *moving* pointer writes the vowel, so the
+                    // Q..T keys can set formants without the resting
+                    // finger instantly overwriting them.
+                    if self.last_mouth_pos.is_none_or(|p| p.distance(pos) > 1.0) {
+                        self.last_mouth_pos = Some(pos);
+                        let x = ((pos.x - rect.left()) / rect.width()).clamp(0.0, 1.0);
+                        let y = ((pos.y - rect.top()) / rect.height()).clamp(0.0, 1.0);
+                        self.mouth.f2.set(f2_hi * (f2_lo / f2_hi).powf(x));
+                        self.mouth.f1.set(f1_lo * (f1_hi / f1_lo).powf(y));
+                    }
                     self.mouth.gate.store(true, Relaxed);
+                    // The marker shows the *actual* formants — pointer
+                    // and key agree on one source of truth.
+                    let marker = to_pos(self.mouth.f1.get(), self.mouth.f2.get());
                     painter.circle_filled(
-                        pos.clamp(rect.min, rect.max),
+                        marker.clamp(rect.min, rect.max),
                         4.0,
                         egui::Color32::from_rgb(255, 180, 90),
                     );
                 } else {
                     self.mouth.gate.store(false, Relaxed);
+                    self.last_mouth_pos = None;
                 }
             });
         });
@@ -903,6 +985,8 @@ fn main() -> eframe::Result {
         rng: Rng(0x74696d62),
         pads,
         pad_sel: 0,
+        rolling: [false; 9],
+        last_mouth_pos: None,
         note: Note::default(),
         from_vowel: 1, // ee → ah: "yah"
         to_vowel: 0,

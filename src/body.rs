@@ -20,8 +20,13 @@ use std::f32::consts::{PI, TAU};
 /// ring: a two-pole's T60 is roughly 2.2/bw seconds.
 type BodyMode = (f32, f32, f32);
 
-pub const PRESETS: &[(&str, &[BodyMode])] = &[
-    ("none", &[]),
+/// (name, modes, ringy). `ringy` marks energy-storage presets (the
+/// plate): their gains are impulse-normalized like drum strikes, so
+/// transients audibly charge them — a peak-normalized narrow resonator
+/// is nearly deaf to a click (the knock lesson, at section scale).
+/// Tone-shaping bodies stay peak-normalized.
+pub const PRESETS: &[(&str, &[BodyMode], bool)] = &[
+    ("none", &[], false),
     (
         "guitar",
         &[
@@ -34,6 +39,7 @@ pub const PRESETS: &[(&str, &[BodyMode])] = &[
             (1300.0, 140.0, 0.15),
             (2400.0, 300.0, 0.10),
         ],
+        false,
     ),
     (
         "violin",
@@ -47,6 +53,7 @@ pub const PRESETS: &[(&str, &[BodyMode])] = &[
             (2500.0, 350.0, 0.50), // bridge hill
             (3400.0, 450.0, 0.25),
         ],
+        false,
     ),
     (
         "shell",
@@ -58,6 +65,30 @@ pub const PRESETS: &[(&str, &[BodyMode])] = &[
             (900.0, 150.0, 0.25),
             (1800.0, 300.0, 0.2),
         ],
+        false,
+    ),
+    (
+        // A big stone room: long low modes, treble dying young. The
+        // decay profile is the acoustic signature — T60 ~ 2.2/bw runs
+        // from ~2.5 s in the lows to ~0.5 s up top.
+        "cathedral",
+        &[
+            (81.0, 0.9, 0.30),
+            (123.0, 1.0, 0.30),
+            (176.0, 1.1, 0.30),
+            (239.0, 1.2, 0.28),
+            (331.0, 1.4, 0.27),
+            (452.0, 1.5, 0.26),
+            (617.0, 1.7, 0.24),
+            (859.0, 1.9, 0.22),
+            (1201.0, 2.1, 0.20),
+            (1667.0, 2.4, 0.17),
+            (2333.0, 2.8, 0.14),
+            (3251.0, 3.2, 0.11),
+            (4523.0, 3.8, 0.09),
+            (6317.0, 4.5, 0.07),
+        ],
+        true,
     ),
     (
         "plate",
@@ -73,6 +104,7 @@ pub const PRESETS: &[(&str, &[BodyMode])] = &[
             (3907.0, 8.0, 0.18),
             (5851.0, 10.0, 0.15),
         ],
+        true,
     ),
 ];
 
@@ -91,10 +123,11 @@ struct Res {
 
 pub struct Body {
     res: Vec<Res>,
+    ringy: bool,
 }
 
 impl Body {
-    pub fn new(modes: &[BodyMode]) -> Self {
+    pub fn new(modes: &[BodyMode], ringy: bool) -> Self {
         let res = modes
             .iter()
             .map(|&(f, bw, gain)| {
@@ -102,23 +135,28 @@ impl Body {
                 let th = TAU * f / SR;
                 let b1 = 2.0 * r * th.cos();
                 let b2 = r * r;
-                // Exact peak normalization: evaluate |denominator| at the
+                // Peak normalization: evaluate |denominator| at the
                 // mode's own frequency, so peak gain is `gain` for every
                 // mode. (The common (1-r) shortcut leaves low modes ~8×
                 // louder than high ones — peak gain goes as 1/sin θ.)
                 let re = 1.0 - b1 * th.cos() + b2 * (2.0 * th).cos();
                 let im = b1 * th.sin() - b2 * (2.0 * th).sin();
+                let peak_g = gain * (re * re + im * im).sqrt();
+                // Ringy presets are impulse-normalized instead, so
+                // transients charge them audibly (with the resonant
+                // amplification of sustained input that reverbs have).
+                let ring_g = 0.5 * gain * th.sin();
                 Res {
                     b1,
                     b2,
-                    g: gain * (re * re + im * im).sqrt(),
+                    g: if ringy { ring_g } else { peak_g },
                     kick: gain * th.sin(),
                     y1: 0.0,
                     y2: 0.0,
                 }
             })
             .collect();
-        Body { res }
+        Body { res, ringy }
     }
 
     /// A knuckle on the box: set every mode ringing at once.
@@ -132,7 +170,15 @@ impl Body {
     pub fn tick(&mut self, x: f32) -> f32 {
         let mut sum = 0.0;
         for r in &mut self.res {
-            let y = r.g * x + r.b1 * r.y1 - r.b2 * r.y2;
+            let mut y = r.g * x + r.b1 * r.y1 - r.b2 * r.y2;
+            if self.ringy {
+                // Energy cap. A ~1 Hz-wide impulse-normalized mode has
+                // a sustained-tone resonant gain near 1000×: a voice
+                // harmonic sweeping across it (vibrato does exactly
+                // this) pumps it into a seconds-long howl. Transients
+                // stay far below the knee, so rings are untouched.
+                y = 0.5 * (y / 0.5).tanh();
+            }
             r.y2 = r.y1;
             r.y1 = y;
             sum += y;
@@ -158,7 +204,7 @@ mod tests {
     /// Steady-state gain at frequency f: drive with a sine, skip the
     /// transient, read the output level.
     fn response_at(modes: &[BodyMode], f: f32) -> f32 {
-        let mut b = Body::new(modes);
+        let mut b = Body::new(modes, false);
         let mut acc = 0.0;
         let n = 22050;
         for i in 0..n {
@@ -174,7 +220,7 @@ mod tests {
     fn body_colors_the_spectrum_and_stays_stable() {
         // The violin body must favor its main wood mode (450 Hz) over
         // the valley between modes (180 Hz).
-        let modes = PRESETS.iter().find(|(n, _)| *n == "violin").unwrap().1;
+        let modes = PRESETS.iter().find(|(n, _, _)| *n == "violin").unwrap().1;
         // Note the modest ratio: below a resonator cluster, every
         // mode's low-frequency skirt adds coherently (near-zero phase),
         // so a two-pole bank's valleys are inherently shallow — a few
@@ -186,7 +232,7 @@ mod tests {
             "no resonance shape: on {on_mode} off {off_mode}"
         );
         // And a knock must be audible, ring out, and not build up.
-        let mut b = Body::new(modes);
+        let mut b = Body::new(modes, false);
         b.knock(0.8);
         let out: Vec<f32> = (0..44100).map(|_| b.tick(0.0)).collect();
         assert!(out.iter().all(|s| s.is_finite()));
@@ -194,5 +240,36 @@ mod tests {
         assert!(early > 0.05, "knock inaudible: rms {early}");
         let tail: f32 = out[33075..].iter().map(|s| s.abs()).sum();
         assert!(tail < 0.1, "body rings forever: {tail}");
+    }
+
+    #[test]
+    fn ringy_plate_responds_to_transients() {
+        // The plate is a reverb: an *input* impulse (not just a knock)
+        // must ring it audibly. Peak-normalized narrow resonators are
+        // ~2000x too quiet here — the original silent-plate bug.
+        let (_, modes, ringy) = PRESETS.iter().find(|(n, _, _)| *n == "plate").unwrap();
+        assert!(*ringy);
+        let mut b = Body::new(modes, *ringy);
+        let out: Vec<f32> = (0..44100)
+            .map(|i| b.tick(if i == 0 { 1.0 } else { 0.0 }))
+            .collect();
+        let early = (out[..22050].iter().map(|s| s * s).sum::<f32>() / 22050.0).sqrt();
+        assert!(early > 0.002, "plate deaf to transients: rms {early}");
+    }
+
+    #[test]
+    fn ringy_body_survives_a_sustained_tone_on_a_mode() {
+        // Park a sine exactly on a cathedral mode: without the energy
+        // cap the mode pumps ~1000x and howls; capped, the output must
+        // stay at musical scale.
+        let (_, modes, ringy) = PRESETS.iter().find(|(n, _, _)| *n == "cathedral").unwrap();
+        let mut b = Body::new(modes, *ringy);
+        let n = 3 * 44100;
+        let out: Vec<f32> = (0..n)
+            .map(|i| b.tick(0.3 * (TAU * 331.0 * i as f32 / SR).sin()))
+            .collect();
+        assert!(out.iter().all(|s| s.is_finite()));
+        let late = (out[2 * 44100..].iter().map(|s| s * s).sum::<f32>() / 44100.0).sqrt();
+        assert!(late < 2.0, "mode howl not contained: rms {late}");
     }
 }

@@ -169,6 +169,79 @@ pub const BELL: &[Mode] = &[
     },
 ];
 
+/// A triangle: a solid steel rod, free at both ends, bent — and the
+/// bend is mostly ergonomics. The ratios are the free-free rod's
+/// bending-mode series (growing ~quadratically, far more stretched than
+/// a bell); what the corners *do* contribute is coupling the two
+/// bending polarizations, splitting each mode into a slightly detuned
+/// doublet — and close pairs beat, which is the shimmer. The splits are
+/// near-constant in absolute Hz (a few Hz of beat at any pitch):
+/// proportional splits push high pairs into 20-150 Hz beating, which
+/// the ear hears as roughness — buzz, not shimmer. Set the
+/// detunes to zero and you're striking the straight rod.
+pub const TRIANGLE: &[Mode] = &[
+    Mode {
+        ratio: 1.000,
+        gain: 0.70,
+        decay: 6.0,
+    },
+    Mode {
+        ratio: 1.003,
+        gain: 0.65,
+        decay: 5.5,
+    },
+    Mode {
+        ratio: 2.756,
+        gain: 1.00,
+        decay: 4.5,
+    },
+    Mode {
+        ratio: 2.760,
+        gain: 0.90,
+        decay: 4.2,
+    },
+    Mode {
+        ratio: 5.404,
+        gain: 0.80,
+        decay: 2.8,
+    },
+    Mode {
+        ratio: 5.409,
+        gain: 0.70,
+        decay: 2.6,
+    },
+    Mode {
+        ratio: 8.933,
+        gain: 0.50,
+        decay: 1.6,
+    },
+    Mode {
+        ratio: 8.938,
+        gain: 0.45,
+        decay: 1.5,
+    },
+    Mode {
+        ratio: 13.34,
+        gain: 0.18,
+        decay: 1.0,
+    },
+    Mode {
+        ratio: 13.345,
+        gain: 0.16,
+        decay: 0.95,
+    },
+    Mode {
+        ratio: 18.64,
+        gain: 0.10,
+        decay: 0.6,
+    },
+    Mode {
+        ratio: 18.645,
+        gain: 0.09,
+        decay: 0.55,
+    },
+];
+
 pub fn render(h: &Hit, rng: &mut Rng) -> Vec<f32> {
     let len = (h.duration * SR) as usize;
     let mut out = vec![0.0f32; len];
