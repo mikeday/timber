@@ -85,7 +85,8 @@ impl Default for Note {
 
 /// Rosenberg glottal pulse: the fold opens smoothly, snaps shut, stays
 /// closed. The sharp closure is what gives the buzz its high harmonics.
-fn glottal(p: f32) -> f32 {
+/// (Shared with the streaming mouth.)
+pub(crate) fn glottal(p: f32) -> f32 {
     const OPEN: f32 = 0.6;
     const CLOSE: f32 = 0.15;
     if p < OPEN {

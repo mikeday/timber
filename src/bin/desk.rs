@@ -1,16 +1,18 @@
 //! The timber desk: a little realtime mixing desk over the models.
 //!
-//! Architecture: drums and voice trigger like samples — the UI renders a
-//! finished buffer with the same offline code the demo uses and ships it
-//! to the audio thread. The strings are different: they are *streaming*
-//! voices owned by the audio thread (timber::stream), persistent loops
-//! the UI steers live through atomics — pluck them, bow them, change
-//! their material while they ring. The mixer (gain, pan, mute, master
-//! with a tanh limiter) is always live.
+//! Architecture: every instrument now streams — the audio thread owns
+//! the string bank (timber::stream), the drum kit (timber::drums) and
+//! the mouth (timber::mouth), and the UI steers them live through
+//! atomics and messages: pluck and bow strings, strike pads whose knobs
+//! act on sounds mid-ring, hold the mouth and sweep its vowel plane.
+//! Only one-shot sung syllables are still rendered as buffers with the
+//! offline voice code. The mixer (gain, pan, mute, master with a tanh
+//! limiter) is always live.
 //!
-//! Keys: Z X C V B N = drums · A S D F G H J K = pluck strings ·
-//! Q W E R T = vowels. Bow the strings by dragging on the bow surface:
-//! horizontal speed is bow speed, vertical position is pressure.
+//! Keys: Z X C V B N = drums · A S D F G H J K = pluck strings (finger
+//! while bowing, melody while the mouth is held) · Q W E R T = vowels.
+//! Bow surface: hold, x-offset from center = speed, height = pressure.
+//! Mouth surface: hold to phonate, position = vowel (F2 × F1).
 
 use std::sync::atomic::{AtomicBool, Ordering::Relaxed};
 use std::sync::mpsc::{Receiver, Sender, channel};
@@ -19,10 +21,9 @@ use std::sync::{Arc, Mutex};
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use eframe::egui;
 
-use timber::modal::{self, Hit};
-use timber::stream;
 use timber::util::{AtomicF32, Rng, SR};
 use timber::voice::{self, Note, Vowel};
+use timber::{drums, modal, mouth, stream};
 
 // ---- Lock-free mixer state shared with the audio thread -----------------
 
@@ -46,10 +47,15 @@ const STRIP_NAMES: [&str; 3] = ["drums", "string", "voice"];
 const SCOPE_LEN: usize = 128;
 
 enum Msg {
-    /// A finished render for the buffer players (drums, voice).
+    /// A finished render for the buffer player (voice one-shots).
     Buffer(usize, Vec<f32>, Option<u8>),
     /// Pluck one streaming string.
     Pluck(usize),
+    /// Hit one streaming drum pad.
+    Strike(usize),
+    /// A pad's parameters changed — the ringing state carries on under
+    /// the new settings.
+    Pad(usize, drums::PadParams),
 }
 
 // ---- Audio thread --------------------------------------------------------
@@ -70,9 +76,11 @@ struct PlayVoice {
 fn start_audio(
     mixer: Arc<Mixer>,
     ctl: Arc<stream::Ctl>,
+    mouth_ctl: Arc<mouth::Ctl>,
     scope: Arc<Mutex<Vec<f32>>>,
     rx: Receiver<Msg>,
     string_freqs: Vec<f32>,
+    pads: Vec<drums::PadParams>,
 ) -> cpal::Stream {
     let device = cpal::default_host()
         .default_output_device()
@@ -93,6 +101,8 @@ fn start_audio(
     let choke_step = 1.0 / (0.004 * config.sample_rate.0 as f32);
 
     let mut bank = stream::Bank::new(&string_freqs);
+    let mut kit = drums::Kit::new(pads);
+    let mut mouth = mouth::Mouth::new();
     let mut rng = Rng(0x626f7765);
     let mut voices: Vec<PlayVoice> = Vec::new();
     let stream = device
@@ -100,9 +110,12 @@ fn start_audio(
             &config,
             move |data: &mut [f32], _| {
                 let p = stream::Params::read(&ctl);
+                let mp = mouth::Params::read(&mouth_ctl);
                 while let Ok(msg) = rx.try_recv() {
                     match msg {
                         Msg::Pluck(i) => bank.pluck(i, ctl.pluck_pos.get(), &mut rng),
+                        Msg::Strike(i) => kit.strike(i),
+                        Msg::Pad(i, params) => kit.set_params(i, params),
                         Msg::Buffer(strip, buf, choke) => {
                             if let Some(group) = choke {
                                 for v in voices.iter_mut() {
@@ -162,6 +175,8 @@ fn start_audio(
                         true
                     });
                     route(bank.tick(&p), &mixer.strips[STRING]);
+                    route(kit.tick(&mut rng), &mixer.strips[DRUMS]);
+                    route(mouth.tick(&mp, &mut rng), &mixer.strips[VOICE]);
                     let m = mixer.master.get();
                     frame[0] = (l * m).tanh();
                     if channels > 1 {
@@ -212,12 +227,11 @@ impl ModeSet {
     }
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, PartialEq)]
 struct DrumParams {
     name: &'static str,
     modes: ModeSet,
     freq: f32,
-    duration: f32,
     glide: f32,
     glide_time: f32,
     damp: f32,
@@ -228,12 +242,28 @@ struct DrumParams {
     choke: Option<u8>,
 }
 
+impl DrumParams {
+    fn to_pad(self) -> drums::PadParams {
+        drums::PadParams {
+            modes: self.modes.slice(),
+            freq: self.freq,
+            glide: self.glide,
+            glide_time: self.glide_time,
+            damp: self.damp,
+            noise: self.noise,
+            noise_decay: self.noise_decay,
+            drive: self.drive,
+            level: self.level,
+            choke: self.choke,
+        }
+    }
+}
+
 fn default_pads() -> Vec<DrumParams> {
     let base = DrumParams {
         name: "",
         modes: ModeSet::Membrane,
         freq: 110.0,
-        duration: 1.2,
         glide: 0.0,
         glide_time: 0.1,
         damp: 1.0,
@@ -250,7 +280,6 @@ fn default_pads() -> Vec<DrumParams> {
             name: "kick",
             modes: ModeSet::Center,
             freq: 60.0,
-            duration: 0.5,
             glide: 0.5,
             glide_time: 0.035,
             damp: 0.35,
@@ -264,7 +293,6 @@ fn default_pads() -> Vec<DrumParams> {
         DrumParams {
             name: "snare",
             freq: 185.0,
-            duration: 0.5,
             glide: 0.15,
             glide_time: 0.05,
             noise: 0.9,
@@ -281,7 +309,6 @@ fn default_pads() -> Vec<DrumParams> {
         DrumParams {
             name: "hat",
             modes: ModeSet::NoiseOnly,
-            duration: 0.08,
             noise: 1.0,
             noise_decay: 0.025,
             level: 0.4,
@@ -291,7 +318,6 @@ fn default_pads() -> Vec<DrumParams> {
         DrumParams {
             name: "open hat",
             modes: ModeSet::NoiseOnly,
-            duration: 0.5,
             noise: 1.0,
             noise_decay: 0.18,
             level: 0.4,
@@ -302,7 +328,6 @@ fn default_pads() -> Vec<DrumParams> {
             name: "bell",
             modes: ModeSet::Bell,
             freq: 440.0,
-            duration: 5.0,
             level: 0.6,
             ..base
         },
@@ -334,6 +359,7 @@ const NOTES: [(&str, f32); 8] = [
 struct Desk {
     mixer: Arc<Mixer>,
     ctl: Arc<stream::Ctl>,
+    mouth: Arc<mouth::Ctl>,
     scope: Arc<Mutex<Vec<f32>>>,
     tx: Sender<Msg>,
     _stream: cpal::Stream,
@@ -351,24 +377,7 @@ struct Desk {
 impl Desk {
     fn strike(&mut self, pad: usize) {
         self.pad_sel = pad;
-        let p = self.pads[pad];
-        let hit = Hit {
-            freq: p.freq,
-            modes: p.modes.slice(),
-            duration: p.duration,
-            glide: p.glide,
-            glide_time: p.glide_time.max(0.005),
-            damp: p.damp,
-            noise: p.noise,
-            noise_decay: p.noise_decay.max(0.002),
-            drive: p.drive,
-            level: p.level,
-        };
-        let _ = self.tx.send(Msg::Buffer(
-            DRUMS,
-            modal::render(&hit, &mut self.rng),
-            p.choke,
-        ));
+        let _ = self.tx.send(Msg::Strike(pad));
     }
 
     fn pluck(&mut self, string: usize) {
@@ -481,6 +490,9 @@ impl eframe::App for Desk {
                 1 if self.ctl.bow_on.load(Relaxed) => {
                     self.ctl.bow_string.store(k, Relaxed);
                 }
+                // While the mouth is held, note keys re-pitch the voice
+                // (the surface hand steers vowels, this hand melody).
+                1 if self.mouth.gate.load(Relaxed) => self.voice_freq = NOTES[k].1,
                 1 => self.pluck(k),
                 _ => self.sing(k, k),
             }
@@ -528,7 +540,8 @@ impl eframe::App for Desk {
             ui.small("Z X C V B N — drums");
             ui.small("A S D F G H J K — pluck (finger, while bowing)");
             ui.small("Q W E R T — vowels");
-            ui.small("drag bow surface — bow");
+            ui.small("hold bow surface — bow");
+            ui.small("hold mouth surface — sing");
         });
 
         egui::CentralPanel::default().show(ctx, |ui| {
@@ -549,6 +562,7 @@ impl eframe::App for Desk {
                 }
                 ui.separator();
                 let p = &mut self.pads[self.pad_sel];
+                let before = *p;
                 ui.label(format!("editing: {}", p.name));
                 egui::ComboBox::from_label("object")
                     .width((ui.available_width() - 130.0).clamp(80.0, 160.0))
@@ -564,7 +578,6 @@ impl eframe::App for Desk {
                         }
                     });
                 slider(ui, &mut p.freq, 25.0..=880.0, true, "freq");
-                slider(ui, &mut p.duration, 0.05..=6.0, true, "duration");
                 slider(ui, &mut p.glide, 0.0..=1.5, false, "pitch glide");
                 slider(ui, &mut p.glide_time, 0.01..=0.5, true, "glide time");
                 slider(ui, &mut p.damp, 0.1..=3.0, true, "muffle");
@@ -575,6 +588,11 @@ impl eframe::App for Desk {
                 let mut chokes = p.choke.is_some();
                 if ui.checkbox(&mut chokes, "choke group").changed() {
                     p.choke = if chokes { Some(0) } else { None };
+                }
+                // Ship changed params to the ringing pad — knob moves
+                // land on sounds already in the air.
+                if *p != before {
+                    let _ = self.tx.send(Msg::Pad(self.pad_sel, p.to_pad()));
                 }
 
                 // ---- Strings.
@@ -692,6 +710,59 @@ impl eframe::App for Desk {
                 if sing_now {
                     self.sing(self.from_vowel, self.to_vowel);
                 }
+                // The streaming mouth shares the sliders' settings.
+                self.mouth.freq.set(self.voice_freq);
+                self.mouth.breath.set(self.note.breath);
+                self.mouth.vibrato.set(self.note.vibrato);
+                self.mouth.level.set(self.note.level);
+                ui.separator();
+
+                // ---- The mouth: hold to phonate, steer through the
+                // phonetician's vowel plane — left/right is tongue
+                // position (F2, front vowels left), up/down is jaw
+                // openness (F1). The named vowels are landmarks in a
+                // continuous space, not the only options.
+                ui.label("mouth — hold to sing, drag between vowels");
+                let h = 80.0;
+                let (rect, resp) = ui
+                    .allocate_exact_size(egui::vec2(ui.available_width(), h), egui::Sense::drag());
+                let painter = ui.painter_at(rect);
+                painter.rect_filled(rect, 4.0, ui.visuals().extreme_bg_color);
+                let (f1_lo, f1_hi) = mouth::F1_RANGE;
+                let (f2_lo, f2_hi) = mouth::F2_RANGE;
+                let to_pos = |f1: f32, f2: f32| {
+                    egui::pos2(
+                        rect.left() + rect.width() * (f2_hi / f2).ln() / (f2_hi / f2_lo).ln(),
+                        rect.top() + rect.height() * (f1 / f1_lo).ln() / (f1_hi / f1_lo).ln(),
+                    )
+                };
+                for (name, v) in &VOWELS {
+                    let (f1, _, _) = v.0[0];
+                    let (f2, _, _) = v.0[1];
+                    painter.text(
+                        to_pos(f1, f2),
+                        egui::Align2::CENTER_CENTER,
+                        *name,
+                        egui::FontId::proportional(12.0),
+                        ui.visuals().weak_text_color(),
+                    );
+                }
+                if (resp.dragged() || resp.is_pointer_button_down_on())
+                    && let Some(pos) = resp.interact_pointer_pos()
+                {
+                    let x = ((pos.x - rect.left()) / rect.width()).clamp(0.0, 1.0);
+                    let y = ((pos.y - rect.top()) / rect.height()).clamp(0.0, 1.0);
+                    self.mouth.f2.set(f2_hi * (f2_lo / f2_hi).powf(x));
+                    self.mouth.f1.set(f1_lo * (f1_hi / f1_lo).powf(y));
+                    self.mouth.gate.store(true, Relaxed);
+                    painter.circle_filled(
+                        pos.clamp(rect.min, rect.max),
+                        4.0,
+                        egui::Color32::from_rgb(255, 180, 90),
+                    );
+                } else {
+                    self.mouth.gate.store(false, Relaxed);
+                }
             });
         });
     }
@@ -719,19 +790,30 @@ fn main() -> eframe::Result {
         master: AtomicF32::new(0.8),
     });
     let ctl = Arc::new(stream::Ctl::new());
+    let mouth_ctl = Arc::new(mouth::Ctl::new());
     let scope = Arc::new(Mutex::new(vec![0.0f32; SCOPE_LEN]));
     let (tx, rx) = channel();
     let freqs = NOTES.iter().map(|(_, f)| *f).collect();
-    let stream = start_audio(mixer.clone(), ctl.clone(), scope.clone(), rx, freqs);
+    let pads = default_pads();
+    let stream = start_audio(
+        mixer.clone(),
+        ctl.clone(),
+        mouth_ctl.clone(),
+        scope.clone(),
+        rx,
+        freqs,
+        pads.iter().map(|p| p.to_pad()).collect(),
+    );
 
     let desk = Desk {
         mixer,
         ctl,
+        mouth: mouth_ctl,
         scope,
         tx,
         _stream: stream,
         rng: Rng(0x74696d62),
-        pads: default_pads(),
+        pads,
         pad_sel: 0,
         note: Note::default(),
         from_vowel: 1, // ee → ah: "yah"
