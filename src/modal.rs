@@ -179,6 +179,11 @@ pub const BELL: &[Mode] = &[
 /// proportional splits push high pairs into 20-150 Hz beating, which
 /// the ear hears as roughness — buzz, not shimmer. Set the
 /// detunes to zero and you're striking the straight rod.
+///
+/// These baked pairs deliberately overlap the runtime `shimmer` knob:
+/// geometry gives each pair member its own gain and decay, which the
+/// symmetric knob cannot express — so the triangle keeps its physics
+/// and the knob stays a generic effect on top.
 pub const TRIANGLE: &[Mode] = &[
     Mode {
         ratio: 1.000,

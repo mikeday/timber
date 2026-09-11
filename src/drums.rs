@@ -53,8 +53,11 @@ struct Resonator {
 
 pub struct Pad {
     p: PadParams,
-    /// Two resonators per mode: the shimmer pair. At shimmer 0 they sit
-    /// on the same frequency and sum to the plain mode.
+    /// Two banks: primary resonators in slots 0..n, shimmer partners in
+    /// MAX_MODES..MAX_MODES+n. With shimmer off and the partner bank
+    /// silent the pairs collapse to single full-gain resonators and the
+    /// partner bank isn't ticked — the doubled cost is only paid while
+    /// actually shimmering.
     res: [Resonator; 2 * MAX_MODES],
     /// Impulse pending injection on the next tick.
     impulse: f32,
@@ -72,6 +75,7 @@ pub struct Pad {
     damp_s: f32,
     freq_s: f32,
     shimmer_s: f32,
+    collapsed: bool,
 }
 
 fn smooth(cur: &mut f32, target: f32) {
@@ -96,13 +100,23 @@ impl Pad {
             damp_s: p.damp,
             freq_s: p.freq,
             shimmer_s: p.shimmer,
+            collapsed: p.shimmer < 1e-3,
         }
     }
 
     fn strike(&mut self, strength: f32) {
         // Normalize the impulse by the bank's total gain so a pad's peak
-        // tracks `level` regardless of how many modes it carries.
-        let sum: f32 = self.p.modes.iter().take(MAX_MODES).map(|m| m.gain).sum();
+        // tracks `level` regardless of how many modes it carries — but
+        // count only modes that will actually sound: a high-tuned pad's
+        // Nyquist-muted modes must not dilute the hit.
+        let sum: f32 = self
+            .p
+            .modes
+            .iter()
+            .take(MAX_MODES)
+            .filter(|m| self.freq_s * m.ratio < 0.45 * SR)
+            .map(|m| m.gain)
+            .sum();
         if sum > 0.0 {
             self.impulse += strength / sum;
         }
@@ -119,23 +133,31 @@ impl Pad {
         // Shimmer: constant-Hz split, so every pair beats at the same
         // slow rate wherever it sits in the spectrum.
         let split = self.shimmer_s * 4.0;
+        self.collapsed = self.shimmer_s < 1e-3
+            && self.res[MAX_MODES..]
+                .iter()
+                .all(|r| r.y1.abs() < 1e-6 && r.y2.abs() < 1e-6);
         for (k, m) in self.p.modes.iter().take(MAX_MODES).enumerate() {
             let f = self.freq_s * m.ratio * fm;
-            for (half, sign) in [(2 * k, -1.0f32), (2 * k + 1, 1.0f32)] {
-                let r = &mut self.res[half];
-                let f = f + sign * split;
+            let pole = (-1.0 / ((m.decay * self.damp_s).max(0.002) * SR)).exp();
+            let primary_gain = if self.collapsed { m.gain } else { 0.5 * m.gain };
+            let halves = [
+                (k, f - split, primary_gain),
+                (MAX_MODES + k, f + split, 0.5 * m.gain),
+            ];
+            for (slot, f, gain) in halves {
+                let r = &mut self.res[slot];
                 if f >= 0.45 * SR || f <= 0.0 {
                     (r.b1, r.b2, r.g) = (0.0, 0.0, 0.0);
                     continue;
                 }
-                let pole = (-1.0 / ((m.decay * self.damp_s).max(0.002) * SR)).exp();
                 let th = TAU * f / SR;
                 r.b1 = 2.0 * pole * th.cos();
                 r.b2 = pole * pole;
-                // Half gain per pair member; sin(θ) input normalization,
-                // without which a low mode rings up 1/sin(θ) ≈ 100×
-                // louder than a high one from the same hit.
-                r.g = 0.5 * m.gain * th.sin();
+                // sin(θ) input normalization, without which a low mode
+                // rings up 1/sin(θ) ≈ 100× louder than a high one from
+                // the same hit.
+                r.g = gain * th.sin();
             }
         }
         // A finished choke clears the bank so denormal-tiny states don't
@@ -156,14 +178,6 @@ impl Pad {
         smooth(&mut self.damp_s, self.p.damp);
         smooth(&mut self.freq_s, self.p.freq);
         smooth(&mut self.shimmer_s, self.p.shimmer);
-        // The roll: humanized restrikes, a player's wrist on a timer.
-        if self.rolling {
-            self.roll_t -= 1.0;
-            if self.roll_t <= 0.0 {
-                self.strike(0.6 + 0.35 * rng.next().abs());
-                self.roll_t = (0.055 + 0.02 * rng.next().abs()) * SR;
-            }
-        }
         self.glide_env *= self.glide_step;
         if self.refresh == 0 {
             self.refresh = REFRESH;
@@ -173,20 +187,26 @@ impl Pad {
 
         let x = self.impulse;
         self.impulse = 0.0;
-        let mut sum = 0.0;
-        for r in self
-            .res
-            .iter_mut()
-            .take(2 * self.p.modes.len().min(MAX_MODES))
-        {
+        let n = self.p.modes.len().min(MAX_MODES);
+        let choking = self.choking;
+        let mut run = |r: &mut Resonator| {
             let y = r.b1 * r.y1 - r.b2 * r.y2 + r.g * x;
             r.y2 = r.y1;
             r.y1 = y;
-            if self.choking {
+            if choking {
                 r.y1 *= CHOKE;
                 r.y2 *= CHOKE;
             }
-            sum += y;
+            y
+        };
+        let mut sum = 0.0;
+        for r in &mut self.res[..n] {
+            sum += run(r);
+        }
+        if !self.collapsed {
+            for r in &mut self.res[MAX_MODES..MAX_MODES + n] {
+                sum += run(r);
+            }
         }
 
         if self.rattle > 1e-6 {
@@ -223,12 +243,25 @@ impl Kit {
     /// the new settings — that's the point.
     pub fn set_params(&mut self, i: usize, p: PadParams) {
         if let Some(pad) = self.pads.get_mut(i) {
+            // Clear resonators beyond the new mode list: a shorter list
+            // would otherwise freeze ringing state mid-vibration, to be
+            // re-driven as a ghost burst by a later longer list (and to
+            // jam the choke-finished cleanup, which scans every slot).
+            let n = p.modes.len().min(MAX_MODES);
+            for k in n..MAX_MODES {
+                pad.res[k] = Resonator::default();
+                pad.res[MAX_MODES + k] = Resonator::default();
+            }
             pad.p = p;
             pad.refresh = 0;
         }
     }
 
     pub fn strike(&mut self, i: usize) {
+        self.strike_with(i, 1.0);
+    }
+
+    fn strike_with(&mut self, i: usize, strength: f32) {
         if i >= self.pads.len() {
             return;
         }
@@ -239,7 +272,7 @@ impl Kit {
                 }
             }
         }
-        self.pads[i].strike(1.0);
+        self.pads[i].strike(strength);
     }
 
     /// Hold-to-roll: while on, the pad restrikes itself with humanized
@@ -255,6 +288,18 @@ impl Kit {
     }
 
     pub fn tick(&mut self, rng: &mut Rng) -> f32 {
+        // Roll restrikes fire at Kit level so they get the same
+        // choke-group treatment as manual strikes — a Pad-local roll
+        // bypassed the scan and even un-choked itself.
+        for i in 0..self.pads.len() {
+            if self.pads[i].rolling {
+                self.pads[i].roll_t -= 1.0;
+                if self.pads[i].roll_t <= 0.0 {
+                    self.strike_with(i, 0.6 + 0.35 * rng.next().abs());
+                    self.pads[i].roll_t = (0.055 + 0.02 * rng.next().abs()) * SR;
+                }
+            }
+        }
         self.pads.iter_mut().map(|p| p.tick(rng)).sum()
     }
 }
@@ -319,6 +364,61 @@ mod tests {
 
     fn rms(buf: &[f32]) -> f32 {
         (buf.iter().map(|s| s * s).sum::<f32>() / buf.len() as f32).sqrt()
+    }
+
+    #[test]
+    fn roll_chokes_siblings() {
+        // Roll restrikes must honor choke groups like manual strikes
+        // (regression: Pad-local rolls bypassed the Kit-level scan).
+        let mut rng = Rng(3);
+        let mut kit = Kit::new(vec![bell(), hat()]);
+        kit.strike(0);
+        run(&mut kit, &mut rng, 8820);
+        kit.set_roll(1, true); // rolling hat shares group 0 with bell
+        run(&mut kit, &mut rng, 17640);
+        kit.set_roll(1, false);
+        run(&mut kit, &mut rng, 8820);
+        let after = run(&mut kit, &mut rng, 8820);
+
+        let mut rng = Rng(3);
+        let mut kit = Kit::new(vec![bell(), hat()]);
+        kit.strike(0);
+        run(&mut kit, &mut rng, 35280);
+        let control = run(&mut kit, &mut rng, 8820);
+
+        assert!(
+            rms(&after) < rms(&control) * 0.1,
+            "roll failed to choke sibling: {} vs control {}",
+            rms(&after),
+            rms(&control)
+        );
+    }
+
+    #[test]
+    fn mode_swap_mid_ring_leaves_no_ghost() {
+        // Swapping to a shorter mode list mid-ring must not freeze
+        // resonator state that a later longer list re-drives as a
+        // ghost burst (regression: tick only updated the first 2n
+        // slots).
+        let mut rng = Rng(3);
+        let mut kit = Kit::new(vec![bell()]);
+        kit.strike(0);
+        run(&mut kit, &mut rng, 8820);
+        kit.set_params(
+            0,
+            PadParams {
+                modes: modal::MEMBRANE_CENTER,
+                ..bell()
+            },
+        );
+        run(&mut kit, &mut rng, 2 * 44100); // short list rings out fully
+        kit.set_params(0, bell());
+        let after = run(&mut kit, &mut rng, 22050);
+        assert!(
+            rms(&after) < 0.01,
+            "ghost ring after mode-list swap: {}",
+            rms(&after)
+        );
     }
 
     #[test]

@@ -169,19 +169,28 @@ impl Body {
     /// Wet output only; the caller mixes it with the dry signal.
     pub fn tick(&mut self, x: f32) -> f32 {
         let mut sum = 0.0;
-        for r in &mut self.res {
-            let mut y = r.g * x + r.b1 * r.y1 - r.b2 * r.y2;
-            if self.ringy {
+        if self.ringy {
+            for r in &mut self.res {
+                let y = r.g * x + r.b1 * r.y1 - r.b2 * r.y2;
                 // Energy cap. A ~1 Hz-wide impulse-normalized mode has
                 // a sustained-tone resonant gain near 1000×: a voice
                 // harmonic sweeping across it (vibrato does exactly
                 // this) pumps it into a seconds-long howl. Transients
-                // stay far below the knee, so rings are untouched.
-                y = 0.5 * (y / 0.5).tanh();
+                // stay far below the knee, so rings are untouched. A
+                // rational knee, not tanh: same shape, a fraction of
+                // the cost in the audio callback's hottest loop.
+                let y = y / (1.0 + 2.0 * y.abs());
+                r.y2 = r.y1;
+                r.y1 = y;
+                sum += y;
             }
-            r.y2 = r.y1;
-            r.y1 = y;
-            sum += y;
+        } else {
+            for r in &mut self.res {
+                let y = r.g * x + r.b1 * r.y1 - r.b2 * r.y2;
+                r.y2 = r.y1;
+                r.y1 = y;
+                sum += y;
+            }
         }
         sum
     }

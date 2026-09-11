@@ -412,6 +412,40 @@ const VOWELS: [(&str, Vowel); 5] = [
     ("oh", voice::OH),
 ];
 
+/// Pad keys, matched against the *physical* key when the event carries
+/// one (shift can change the logical key on some layouts — QWERTZ turns
+/// shift+',' into ';' — which would strand roll state). Must stay in
+/// step with default_pads(): asserted at startup.
+const DRUM_KEYS: [egui::Key; 9] = [
+    egui::Key::Z,
+    egui::Key::X,
+    egui::Key::C,
+    egui::Key::V,
+    egui::Key::B,
+    egui::Key::N,
+    egui::Key::M,
+    egui::Key::Comma,
+    egui::Key::Period,
+];
+const NPADS: usize = DRUM_KEYS.len();
+const NOTE_KEYS: [egui::Key; 8] = [
+    egui::Key::A,
+    egui::Key::S,
+    egui::Key::D,
+    egui::Key::F,
+    egui::Key::G,
+    egui::Key::H,
+    egui::Key::J,
+    egui::Key::K,
+];
+const VOWEL_KEYS: [egui::Key; 5] = [
+    egui::Key::Q,
+    egui::Key::W,
+    egui::Key::E,
+    egui::Key::R,
+    egui::Key::T,
+];
+
 // A-minor pentatonic across two octaves, matching the demo.
 const NOTES: [(&str, f32); 8] = [
     ("A2", 110.0),
@@ -437,7 +471,8 @@ struct Desk {
 
     pads: Vec<DrumParams>,
     pad_sel: usize,
-    rolling: [bool; 9],
+    rolling: [bool; NPADS],
+    drum_down: [bool; NPADS],
     last_mouth_pos: Option<egui::Pos2>,
 
     note: Note,
@@ -482,9 +517,10 @@ fn slider(
     range: std::ops::RangeInclusive<f32>,
     log: bool,
     label: &str,
-) {
+) -> bool {
     ui.spacing_mut().slider_width = track_width(ui);
-    ui.add(egui::Slider::new(v, range).logarithmic(log).text(label));
+    ui.add(egui::Slider::new(v, range).logarithmic(log).text(label))
+        .changed()
 }
 
 /// A slider over a thread-shared parameter: the audio side sees the move
@@ -516,57 +552,40 @@ impl eframe::App for Desk {
         ctx.request_repaint_after(std::time::Duration::from_millis(33));
 
         // ---- Keyboard: collect first, act after, to keep borrows simple.
-        use egui::Key;
-        const DRUM_KEYS: [Key; 9] = [
-            Key::Z,
-            Key::X,
-            Key::C,
-            Key::V,
-            Key::B,
-            Key::N,
-            Key::M,
-            Key::Comma,
-            Key::Period,
-        ];
-        const NOTE_KEYS: [Key; 8] = [
-            Key::A,
-            Key::S,
-            Key::D,
-            Key::F,
-            Key::G,
-            Key::H,
-            Key::J,
-            Key::K,
-        ];
-        const VOWEL_KEYS: [Key; 5] = [Key::Q, Key::W, Key::E, Key::R, Key::T];
-        // Real key presses only: OS key-repeat would machine-gun plucks
-        // and drum hits when a key is held.
+        // Real key presses only (OS key-repeat would machine-gun hits),
+        // matched on the physical key where available so shift and
+        // layout can't reroute a held pad key.
         let mut acts: Vec<(usize, usize)> = Vec::new(); // (kind, index)
         ctx.input(|i| {
             for ev in &i.events {
                 let egui::Event::Key {
                     key,
-                    pressed: true,
-                    repeat: false,
+                    physical_key,
+                    pressed,
+                    repeat,
                     ..
                 } = ev
                 else {
                     continue;
                 };
-                if let Some(k) = DRUM_KEYS.iter().position(|d| d == key) {
-                    acts.push((0, k));
-                } else if let Some(k) = NOTE_KEYS.iter().position(|d| d == key) {
-                    acts.push((1, k));
-                } else if let Some(k) = VOWEL_KEYS.iter().position(|d| d == key) {
-                    acts.push((2, k));
+                let key = physical_key.unwrap_or(*key);
+                if let Some(k) = DRUM_KEYS.iter().position(|d| *d == key) {
+                    self.drum_down[k] = *pressed;
+                    if *pressed && !*repeat {
+                        acts.push((0, k));
+                    }
+                } else if *pressed && !*repeat {
+                    if let Some(k) = NOTE_KEYS.iter().position(|d| *d == key) {
+                        acts.push((1, k));
+                    } else if let Some(k) = VOWEL_KEYS.iter().position(|d| *d == key) {
+                        acts.push((2, k));
+                    }
                 }
             }
-        });
-        // Shift+drum-key held = roll; a plain press stays a clean
-        // single hit.
-        ctx.input(|i| {
-            for (k, key) in DRUM_KEYS.iter().enumerate() {
-                let down = i.key_down(*key) && i.modifiers.shift;
+            // Shift+drum-key held = roll; a plain press stays a clean
+            // single hit.
+            for k in 0..NPADS {
+                let down = self.drum_down[k] && i.modifiers.shift;
                 if down != self.rolling[k] {
                     self.rolling[k] = down;
                     let _ = self.tx.send(Msg::Roll(k, down));
@@ -694,7 +713,10 @@ impl eframe::App for Desk {
                 }
                 ui.separator();
                 let p = &mut self.pads[self.pad_sel];
-                let before = *p;
+                // Response-based edit detection: comparing the struct
+                // before/after would mistake egui's clamp-on-show for a
+                // user edit (the silent-retune bug).
+                let mut edited = false;
                 ui.label(format!("editing: {}", p.name));
                 egui::ComboBox::from_label("object")
                     .width((ui.available_width() - 130.0).clamp(80.0, 160.0))
@@ -707,31 +729,32 @@ impl eframe::App for Desk {
                             ModeSet::Triangle,
                             ModeSet::NoiseOnly,
                         ] {
-                            ui.selectable_value(&mut p.modes, m, m.name());
+                            edited |= ui.selectable_value(&mut p.modes, m, m.name()).changed();
                         }
                     });
                 // Range must contain every pad's default: egui clamps an
                 // out-of-range value the moment the slider is shown, the
                 // change-detector reads that as an edit, and the pad gets
                 // silently retuned (the triangle's one-time "mwup").
-                slider(ui, &mut p.freq, 25.0..=2400.0, true, "freq");
-                slider(ui, &mut p.glide, 0.0..=1.5, false, "pitch glide");
-                slider(ui, &mut p.glide_time, 0.01..=0.5, true, "glide time");
+                edited |= slider(ui, &mut p.freq, 25.0..=2400.0, true, "freq");
+                edited |= slider(ui, &mut p.glide, 0.0..=1.5, false, "pitch glide");
+                edited |= slider(ui, &mut p.glide_time, 0.01..=0.5, true, "glide time");
                 // Floor low enough to be a hand grabbing the metal: at
                 // 0.02 a six-second triangle mode dies in ~0.1s.
-                slider(ui, &mut p.damp, 0.02..=3.0, true, "muffle");
-                slider(ui, &mut p.noise, 0.0..=1.0, false, "rattle");
-                slider(ui, &mut p.noise_decay, 0.002..=0.5, true, "rattle decay");
-                slider(ui, &mut p.drive, 0.0..=6.0, false, "drive");
-                slider(ui, &mut p.shimmer, 0.0..=1.0, false, "shimmer");
-                slider(ui, &mut p.level, 0.0..=1.0, false, "level");
+                edited |= slider(ui, &mut p.damp, 0.02..=3.0, true, "muffle");
+                edited |= slider(ui, &mut p.noise, 0.0..=1.0, false, "rattle");
+                edited |= slider(ui, &mut p.noise_decay, 0.002..=0.5, true, "rattle decay");
+                edited |= slider(ui, &mut p.drive, 0.0..=6.0, false, "drive");
+                edited |= slider(ui, &mut p.shimmer, 0.0..=1.0, false, "shimmer");
+                edited |= slider(ui, &mut p.level, 0.0..=1.0, false, "level");
                 let mut chokes = p.choke.is_some();
                 if ui.checkbox(&mut chokes, "choke group").changed() {
                     p.choke = if chokes { Some(0) } else { None };
+                    edited = true;
                 }
                 // Ship changed params to the ringing pad — knob moves
                 // land on sounds already in the air.
-                if *p != before {
+                if edited {
                     let _ = self.tx.send(Msg::Pad(self.pad_sel, p.to_pad()));
                 }
 
@@ -931,29 +954,36 @@ impl eframe::App for Desk {
 }
 
 fn main() -> eframe::Result {
-    // Body preset indices follow body::PRESETS order:
-    // 0 none · 1 guitar · 2 violin · 3 shell · 4 plate.
+    // Bodies are found by name — hardcoded indices silently retarget
+    // whenever a preset is inserted (the voice strip once defaulted to
+    // cathedral because 'plate' had shifted from 4 to 5).
+    let preset = |name: &str| {
+        body::PRESETS
+            .iter()
+            .position(|(n, _, _)| *n == name)
+            .expect("unknown body preset") as usize
+    };
     let mixer = Arc::new(Mixer {
         strips: [
             Strip {
                 gain: AtomicF32::new(0.9),
                 pan: AtomicF32::new(0.0),
                 mute: AtomicBool::new(false),
-                body: AtomicUsize::new(3),
+                body: AtomicUsize::new(preset("shell")),
                 body_wet: AtomicF32::new(0.4),
             },
             Strip {
                 gain: AtomicF32::new(0.7),
                 pan: AtomicF32::new(0.0),
                 mute: AtomicBool::new(false),
-                body: AtomicUsize::new(1),
+                body: AtomicUsize::new(preset("guitar")),
                 body_wet: AtomicF32::new(0.5),
             },
             Strip {
                 gain: AtomicF32::new(0.8),
                 pan: AtomicF32::new(0.0),
                 mute: AtomicBool::new(false),
-                body: AtomicUsize::new(4),
+                body: AtomicUsize::new(preset("plate")),
                 body_wet: AtomicF32::new(0.3),
             },
         ],
@@ -965,6 +995,7 @@ fn main() -> eframe::Result {
     let (tx, rx) = channel();
     let freqs = NOTES.iter().map(|(_, f)| *f).collect();
     let pads = default_pads();
+    assert_eq!(pads.len(), NPADS, "DRUM_KEYS and default_pads out of step");
     let stream = start_audio(
         mixer.clone(),
         ctl.clone(),
@@ -985,7 +1016,8 @@ fn main() -> eframe::Result {
         rng: Rng(0x74696d62),
         pads,
         pad_sel: 0,
-        rolling: [false; 9],
+        rolling: [false; NPADS],
+        drum_down: [false; NPADS],
         last_mouth_pos: None,
         note: Note::default(),
         from_vowel: 1, // ee → ah: "yah"
