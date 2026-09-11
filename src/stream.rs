@@ -48,6 +48,14 @@ pub struct Ctl {
     pub stiffness: AtomicF32,
     pub pluck_pos: AtomicF32,
     pub level: AtomicF32,
+    /// Sympathetic coupling: the fraction of each string's bridge wave
+    /// the shared bridge hands to the other strings — PER ROUND TRIP,
+    /// which is milliseconds, so honest values are tiny (~0.001-0.01).
+    /// The donated fraction is subtracted from the string's own
+    /// reflection (passivity demands it), so sympathy is always paid
+    /// for out of sustain; audible blooming comes from the receiving
+    /// strings' high Q integrating the trickle, not from a big c.
+    pub couple: AtomicF32,
     pub bow_on: AtomicBool,
     /// Signed bow velocity, roughly -1..1: the hand. Reversing sign is a
     /// bow change, complete with re-attack scratch.
@@ -57,6 +65,11 @@ pub struct Ctl {
     pub bow_pressure: AtomicF32,
     /// Which string the bow currently touches.
     pub bow_string: AtomicUsize,
+    /// Hurdy-gurdy mode: the bow touches every string at once, each
+    /// locking to its own pitch — a continuously excited drone, which
+    /// is how real drone instruments actually drone (sympathy alone
+    /// only charges shared partials).
+    pub drone: AtomicBool,
 }
 
 impl Ctl {
@@ -67,10 +80,12 @@ impl Ctl {
             stiffness: AtomicF32::new(0.0),
             pluck_pos: AtomicF32::new(0.2),
             level: AtomicF32::new(0.8),
+            couple: AtomicF32::new(0.003),
             bow_on: AtomicBool::new(false),
             bow_speed: AtomicF32::new(0.0),
             bow_pressure: AtomicF32::new(0.5),
             bow_string: AtomicUsize::new(0),
+            drone: AtomicBool::new(false),
         }
     }
 }
@@ -88,10 +103,12 @@ pub struct Params {
     pub damping: f32,
     pub stiffness: f32,
     pub level: f32,
+    pub couple: f32,
     pub bow_on: bool,
     pub bow_speed: f32,
     pub bow_pressure: f32,
     pub bow_string: usize,
+    pub drone: bool,
 }
 
 impl Params {
@@ -101,10 +118,12 @@ impl Params {
             damping: ctl.damping.get(),
             stiffness: ctl.stiffness.get(),
             level: ctl.level.get(),
+            couple: ctl.couple.get().clamp(0.0, 0.5),
             bow_on: ctl.bow_on.load(Relaxed),
             bow_speed: ctl.bow_speed.get(),
             bow_pressure: ctl.bow_pressure.get(),
             bow_string: ctl.bow_string.load(Relaxed),
+            drone: ctl.drone.load(Relaxed),
         }
     }
 }
@@ -131,6 +150,7 @@ pub struct Voice {
     damping: f32,
     decay: f32,
     stiffness: f32,
+    couple: f32,
     bow_speed: f32,
     bow_pressure: f32,
 }
@@ -163,6 +183,7 @@ impl Voice {
             damping: 0.5,
             decay: 0.996,
             stiffness: 0.0,
+            couple: 0.0,
             bow_speed: 0.0,
             bow_pressure: 0.0,
         }
@@ -198,10 +219,14 @@ impl Voice {
         }
     }
 
-    fn tick(&mut self, p: &Params, bowed: bool) -> f32 {
+    /// `cross` is the average of the other strings' bridge waves from
+    /// the previous sample; the return is (audible output, own bridge
+    /// wave for the pool).
+    fn tick(&mut self, p: &Params, bowed: bool, cross: f32) -> (f32, f32) {
         smooth(&mut self.damping, p.damping);
         smooth(&mut self.decay, p.decay);
         smooth(&mut self.stiffness, p.stiffness);
+        smooth(&mut self.couple, p.couple);
         let on = bowed && p.bow_on;
         smooth(&mut self.bow_speed, if on { p.bow_speed } else { 0.0 });
         smooth(
@@ -221,7 +246,16 @@ impl Voice {
         let ap = a * lp + self.ap_x1 - a * self.ap_y1;
         self.ap_x1 = lp;
         self.ap_y1 = ap;
-        let br = -(self.decay * ap);
+        let f = self.decay * ap;
+
+        // Sympathetic coupling: the bridge is shared, and a passive
+        // bridge redistributes rather than creates — each string gets
+        // (1-c) of its own wave back and c of the others' pool. Naively
+        // *adding* neighbors' signal instead builds a gain loop between
+        // strings that share a resonance and self-oscillates; swapping
+        // conserves energy at any coupling strength.
+        let c = self.couple;
+        let br = -((1.0 - c) * f + c * cross);
 
         // Nut reflection: inverting, lossless.
         let nr = -n_out;
@@ -262,7 +296,7 @@ impl Voice {
         // drives a body. The velocity under the bow itself is a stick
         // plateau with slip spikes: nasal, buzzy, and not what a real
         // instrument radiates.
-        br
+        (br, f)
     }
 }
 
@@ -270,12 +304,17 @@ impl Voice {
 /// The bow touches one of them; plucks land on any.
 pub struct Bank {
     voices: Vec<Voice>,
+    /// Each string's bridge wave from the previous sample — the pool
+    /// the shared bridge redistributes (one-sample delay keeps the
+    /// exchange causal and adds no energy).
+    pool: Vec<f32>,
 }
 
 impl Bank {
     pub fn new(freqs: &[f32]) -> Self {
         Bank {
             voices: freqs.iter().map(|&f| Voice::new(f)).collect(),
+            pool: vec![0.0; freqs.len()],
         }
     }
 
@@ -286,9 +325,14 @@ impl Bank {
     }
 
     pub fn tick(&mut self, p: &Params) -> f32 {
+        let total: f32 = self.pool.iter().sum();
+        let others = (self.pool.len().max(2) - 1) as f32;
         let mut sum = 0.0;
         for (i, v) in self.voices.iter_mut().enumerate() {
-            sum += v.tick(p, i == p.bow_string);
+            let cross = (total - self.pool[i]) / others;
+            let (out, f) = v.tick(p, p.drone || i == p.bow_string, cross);
+            self.pool[i] = f;
+            sum += out;
         }
         sum * p.level
     }
@@ -328,11 +372,82 @@ mod tests {
             damping: 0.5,
             stiffness: 0.0,
             level: 1.0,
+            couple: 0.0,
             bow_on: false,
             bow_speed: 0.0,
             bow_pressure: 0.0,
             bow_string: 0,
+            drone: false,
         }
+    }
+
+    #[test]
+    fn sympathetic_strings_ring_along() {
+        // Octave pair: pluck the low string; the high one must start
+        // moving through the shared bridge — and stay still without
+        // coupling.
+        let energy = |couple: f32| {
+            let mut bank = Bank::new(&[110.0, 220.0]);
+            let p = Params { couple, ..params() };
+            bank.pluck(0, 0.2, &mut Rng(7));
+            // Sympathy blooms slowly: the receiver integrates a trickle.
+            let mut peak = 0.0f32;
+            for _ in 0..8 {
+                for _ in 0..11025 {
+                    bank.tick(&p);
+                }
+                let mut shape = [0.0f32; 64];
+                bank.shape(1, &mut shape);
+                let rms = (shape.iter().map(|s| s * s).sum::<f32>() / 64.0).sqrt();
+                peak = peak.max(rms);
+            }
+            peak
+        };
+        let coupled = energy(0.008);
+        let isolated = energy(0.0);
+        assert!(
+            coupled > 0.005 && coupled > isolated * 10.0,
+            "no sympathy: coupled {coupled} isolated {isolated}"
+        );
+    }
+
+    #[test]
+    fn sympathy_does_not_kill_sustain() {
+        // The donated fraction comes out of the string's own reflection
+        // every round trip, so an overscaled c makes every pluck
+        // staccato. At the default scale a ring one second in must
+        // still be most of what it would be uncoupled.
+        let ring = |couple: f32| {
+            let mut bank = Bank::new(&[220.0, 110.0]);
+            let p = Params { couple, ..params() };
+            bank.pluck(0, 0.2, &mut Rng(7));
+            let out: Vec<f32> = (0..44100).map(|_| bank.tick(&p)).collect();
+            rms(&out[22050..])
+        };
+        let with = ring(0.003);
+        let without = ring(0.0);
+        assert!(
+            with > without * 0.4,
+            "sympathy murders sustain: {with} vs {without}"
+        );
+    }
+
+    #[test]
+    fn coupling_stays_passive() {
+        // Heavy coupling + a sustained bow: the redistributing bridge
+        // must never let cross-string feedback run away.
+        let mut bank = Bank::new(&[110.0, 220.0, 164.81]);
+        let p = Params {
+            couple: 0.5,
+            bow_on: true,
+            bow_speed: 0.6,
+            bow_pressure: 0.5,
+            ..params()
+        };
+        let out: Vec<f32> = (0..3 * 44100).map(|_| bank.tick(&p)).collect();
+        assert!(out.iter().all(|s| s.is_finite()));
+        let late = rms(&out[2 * 44100..]);
+        assert!(late < 2.0, "coupled bank ran away: rms {late}");
     }
 
     #[test]

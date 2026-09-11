@@ -17,9 +17,11 @@ fn main() {
             stiffness: 0.0,
             level: 1.0,
             bow_on: true,
+            couple: 0.0,
             bow_speed: speed,
             bow_pressure: pressure,
             bow_string: 0,
+            drone: false,
         };
         print!("speed {speed:.1} pressure {pressure:.1} |");
         let mut last = Vec::new();
@@ -55,9 +57,11 @@ fn main() {
             stiffness: 0.0,
             level: 1.0,
             bow_on: true,
+            couple: 0.0,
             bow_speed: speed,
             bow_pressure: 0.5,
             bow_string: 0,
+            drone: false,
         };
         let n = (3.0 * SR) as usize;
         let buf: Vec<f32> = (0..n).map(|_| bank.tick(&p)).collect();
@@ -82,10 +86,12 @@ fn main() {
         damping: 0.5,
         stiffness: 0.0,
         level: 1.0,
+        couple: 0.0,
         bow_on: false,
         bow_speed: 0.0,
         bow_pressure: 0.0,
         bow_string: 0,
+        drone: false,
     };
     let mut bank = Bank::new(&[220.0]);
     bank.pluck(0, 0.2, &mut timber::util::Rng(7));

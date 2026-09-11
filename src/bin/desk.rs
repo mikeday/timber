@@ -575,6 +575,7 @@ impl eframe::App for Desk {
             });
             ui.separator();
             ui.label("bodies");
+            ui.small("slider: dry ← → body");
             for (i, strip) in self.mixer.strips.iter().enumerate() {
                 ui.horizontal(|ui| {
                     let mut sel = strip.body.load(Relaxed).min(body::PRESETS.len() - 1);
@@ -681,6 +682,7 @@ impl eframe::App for Desk {
                 ctl_slider(ui, &self.ctl.damping, 0.0..=1.0, false, "damping");
                 ctl_slider(ui, &self.ctl.pluck_pos, 0.0..=0.5, false, "pluck pos");
                 ctl_slider(ui, &self.ctl.stiffness, 0.0..=0.9, false, "stiffness");
+                ctl_slider(ui, &self.ctl.couple, 0.0..=0.01, false, "sympathy");
                 ctl_slider(ui, &self.ctl.level, 0.0..=1.0, false, "level");
                 ui.separator();
 
@@ -694,10 +696,21 @@ impl eframe::App for Desk {
                 // motion, and a bow *change* should be a deliberate
                 // crossing of the center, not every scrub reversal.
                 let bowed = self.ctl.bow_string.load(Relaxed);
-                ui.label(format!(
-                    "bow — {} (hold: ⇄ from center = speed, height = pressure)",
-                    NOTES[bowed].0
-                ));
+                let mut drone = self.ctl.drone.load(Relaxed);
+                if ui
+                    .checkbox(&mut drone, "drone — bow all strings at once")
+                    .changed()
+                {
+                    self.ctl.drone.store(drone, Relaxed);
+                }
+                ui.label(if drone {
+                    "bow — all strings (hold: ⇄ = speed, height = pressure)".to_string()
+                } else {
+                    format!(
+                        "bow — {} (hold: ⇄ from center = speed, height = pressure)",
+                        NOTES[bowed].0
+                    )
+                });
                 let h = 80.0;
                 let (rect, resp) = ui
                     .allocate_exact_size(egui::vec2(ui.available_width(), h), egui::Sense::drag());
