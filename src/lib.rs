@@ -6,6 +6,7 @@
 //!   voice:  glottal buzz → moving formant modes  (voice.rs)
 
 pub mod modal;
+pub mod stream;
 pub mod string;
 pub mod util;
 pub mod voice;

@@ -118,20 +118,7 @@ pub fn render(p: &Pluck, rng: &mut Rng) -> Vec<f32> {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    /// Measure the rendered pitch by autocorrelation with parabolic
-    /// sub-sample refinement.
-    fn measured_freq(buf: &[f32], approx_freq: f32) -> f32 {
-        let approx = SR / approx_freq;
-        let ac = |lag: usize| -> f32 {
-            let n = 8192.min(buf.len() - lag);
-            (0..n).map(|i| buf[i] * buf[i + lag]).sum()
-        };
-        let (lo, hi) = ((approx * 0.94) as usize, (approx * 1.06) as usize + 1);
-        let best = (lo..=hi).max_by(|&x, &y| ac(x).total_cmp(&ac(y))).unwrap();
-        let (a, b, c) = (ac(best - 1), ac(best), ac(best + 1));
-        SR / (best as f32 + 0.5 * (a - c) / (a - 2.0 * b + c))
-    }
+    use crate::util::measured_freq;
 
     #[test]
     fn pitch_lands_within_two_cents() {
