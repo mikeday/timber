@@ -9,6 +9,7 @@ pub mod body;
 pub mod drums;
 pub mod modal;
 pub mod mouth;
+pub mod sing;
 pub mod speak;
 pub mod stream;
 pub mod string;

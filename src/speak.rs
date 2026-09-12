@@ -29,6 +29,10 @@ pub struct Seg {
     pub velum: f32,
     /// Tongue-tip raising: /n t d l/ close with the tip, body free.
     pub tip: f32,
+    /// Sung pitch in Hz at reference transpose (0.0 = speak at the
+    /// live pitch). Set by sing::song; glides across transitions —
+    /// free portamento, which is what legato singing is.
+    pub freq: f32,
     /// Seconds gliding from the previous target...
     pub trans: f32,
     /// ...then seconds holding this one.
@@ -51,6 +55,7 @@ fn seg(
         flow: 1.0,
         velum: 0.0,
         tip: 0.0,
+        freq: 0.0,
         trans: trans_ms / 1000.0,
         hold: hold_ms / 1000.0,
     }
@@ -249,6 +254,10 @@ fn phoneme(tok: &str) -> Option<Vec<Seg>> {
             flow: 0.7, // voicing throttles the air supply
             ..seg((0.85, 0.95, 0.9), 0.6, 0.04, 60.0, 120.0)
         }],
+        "v" => vec![Seg {
+            flow: 0.7,
+            ..seg((0.5, 0.4, 0.02), 0.6, 0.04, 50.0, 90.0)
+        }],
         "m" => nasal((0.5, 0.35, 0.0), 1.0),
         "n" => nasal_tip(),
         "ng" => nasal((0.3, 1.15, 0.9), 0.1),
@@ -422,8 +431,20 @@ impl Utterance {
             };
             let lerp = |a: f32, b: f32| a + (b - a) * u;
             self.t += 1.0 / SR;
+            let freq = if s.freq > 0.0 {
+                let f0 = if self.from.freq > 0.0 {
+                    self.from.freq
+                } else {
+                    s.freq
+                };
+                // The base pitch acts as a transpose relative to the
+                // tract's 120 Hz reference.
+                lerp(f0, s.freq) * base.freq / 120.0
+            } else {
+                base.freq
+            };
             return Some(Params {
-                freq: base.freq,
+                freq,
                 tongue_pos: lerp(self.from.tongue, s.tongue),
                 constrict: lerp(self.from.constrict, s.constrict),
                 lips: lerp(self.from.lips, s.lips),

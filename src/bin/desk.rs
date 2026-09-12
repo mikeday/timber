@@ -28,7 +28,7 @@ use eframe::egui;
 
 use timber::util::{AtomicF32, Rng, SR};
 use timber::voice::{self, Note, Vowel};
-use timber::{body, drums, modal, mouth, speak, stream, tract};
+use timber::{body, drums, modal, mouth, sing, speak, stream, tract};
 
 // ---- Lock-free mixer state shared with the audio thread -----------------
 
@@ -974,6 +974,10 @@ impl eframe::App for Desk {
                             if !segs.is_empty() {
                                 let _ = self.tx.send(Msg::Speak(segs));
                             }
+                        }
+                        // The 1961 tribute. The pitch slider transposes.
+                        if ui.button("♪ daisy").clicked() {
+                            let _ = self.tx.send(Msg::Speak(sing::daisy()));
                         }
                         ui.add(
                             egui::TextEdit::singleline(&mut self.phrase)
