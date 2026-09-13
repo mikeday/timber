@@ -12,7 +12,9 @@ use crate::modal::Mode;
 use crate::util::{Rng, SR};
 use std::f32::consts::TAU;
 
-pub const MAX_MODES: usize = 12;
+/// Enough for a synth cymbal's partials; a pad only ticks the modes
+/// it has, so the small pads cost nothing extra.
+pub const MAX_MODES: usize = 48;
 
 /// Coefficients are refreshed every this many samples — cheap enough to
 /// track the pitch glide, rare enough to keep the exp/cos off the
@@ -32,10 +34,21 @@ pub struct PadParams {
     pub damp: f32,
     pub noise: f32,
     pub noise_decay: f32,
+    /// Color of the noise burst, 0..1: 0 is the bright, flat rattle a
+    /// snare or a stick click wants; 1 is a cymbal wash — noise
+    /// through a broad resonance that starts high and falls as the
+    /// burst decays, the way a crash's roar darkens into its tail.
+    pub noise_tone: f32,
+    /// Wash bloom, 0..1: a hard hit sends a second, delayed impulse
+    /// into the upper partials (~25 ms after the stick, growing with
+    /// strength²), so the roar is made of the ring's own partials
+    /// rather than laid over it as noise — the *outcome* of a cymbal's
+    /// cascade, without simulating the cascade.
+    pub bloom: f32,
     pub drive: f32,
     /// Doublet splitting, 0..1: every mode becomes a detuned pair, the
     /// triangle's corner trick generalized. The split is constant in Hz
-    /// (up to ~8 Hz of beat at 1.0) — proportional splits would push
+    /// (2–18 Hz of beat at 1.0, scattered per mode) — proportional splits would push
     /// high modes into 20-150 Hz beating, which reads as buzz.
     pub shimmer: f32,
     pub level: f32,
@@ -61,11 +74,21 @@ pub struct Pad {
     res: [Resonator; 2 * MAX_MODES],
     /// Impulse pending injection on the next tick.
     impulse: f32,
+    /// The bloom: an impulse weighted toward the high partials, held
+    /// back a few ms after the strike.
+    bloom_pending: f32,
+    bloom_wait: u32,
+    impulse_hi: f32,
     glide_env: f32,
     glide_step: f32,
     rattle: f32,
     rattle_step: f32,
     rattle_prev: f32,
+    /// The burst's level at the strike (for the wash's brightness
+    /// envelope) and the wash resonator's state.
+    rattle0: f32,
+    wash_y1: f32,
+    wash_y2: f32,
     choking: bool,
     refresh: u32,
     rolling: bool,
@@ -88,11 +111,17 @@ impl Pad {
             p,
             res: [Resonator::default(); 2 * MAX_MODES],
             impulse: 0.0,
+            bloom_pending: 0.0,
+            bloom_wait: 0,
+            impulse_hi: 0.0,
             glide_env: 0.0,
             glide_step: 1.0,
             rattle: 0.0,
             rattle_step: 1.0,
             rattle_prev: 0.0,
+            rattle0: 1.0,
+            wash_y1: 0.0,
+            wash_y2: 0.0,
             choking: false,
             refresh: 0,
             rolling: false,
@@ -119,10 +148,15 @@ impl Pad {
             .sum();
         if sum > 0.0 {
             self.impulse += strength / sum;
+            if self.p.bloom > 0.0 {
+                self.bloom_pending += self.p.bloom * strength * strength * 2.0 / sum;
+                self.bloom_wait = (0.025 * SR) as u32;
+            }
         }
         self.glide_env = 1.0;
         self.glide_step = (-1.0 / (self.p.glide_time.max(0.005) * SR)).exp();
         self.rattle = self.p.noise * 0.5;
+        self.rattle0 = self.rattle.max(1e-9);
         self.rattle_step = (-1.0 / (self.p.noise_decay.max(0.002) * SR)).exp();
         self.choking = false;
         self.refresh = 0;
@@ -130,15 +164,23 @@ impl Pad {
 
     fn refresh_coeffs(&mut self) {
         let fm = 1.0 + self.p.glide * self.glide_env;
-        // Shimmer: constant-Hz split, so every pair beats at the same
-        // slow rate wherever it sits in the spectrum.
-        let split = self.shimmer_s * 4.0;
+        // Shimmer: constant-Hz split (proportional splits push high
+        // modes into 20–150 Hz beating, which reads as buzz), varied
+        // per mode — identical splits made every pair beat in step,
+        // a coherent tremolo that on a 48-partial cymbal was a slow
+        // wah over the whole sound. Real doublets split unevenly.
+        let split0 = self.shimmer_s * 4.0;
         self.collapsed = self.shimmer_s < 1e-3
             && self.res[MAX_MODES..]
                 .iter()
                 .all(|r| r.y1.abs() < 1e-6 && r.y2.abs() < 1e-6);
         for (k, m) in self.p.modes.iter().take(MAX_MODES).enumerate() {
             let f = self.freq_s * m.ratio * fm;
+            // 0.3..2.2 of the nominal split, scattered by mode index.
+            // Beats below ~4 Hz read as a slow wah on a long-ringing
+            // partial, above it as shimmer: long sustains want a
+            // higher shimmer setting, not a lower one.
+            let split = split0 * (0.3 + 1.9 * ((k * 37 + 11) % 23) as f32 / 22.0);
             let pole = (-1.0 / ((m.decay * self.damp_s).max(0.002) * SR)).exp();
             let primary_gain = if self.collapsed { m.gain } else { 0.5 * m.gain };
             let halves = [
@@ -164,6 +206,7 @@ impl Pad {
         // linger.
         if self.choking
             && self.rattle < 1e-6
+            && self.bloom_pending <= 0.0
             && self
                 .res
                 .iter()
@@ -187,10 +230,25 @@ impl Pad {
 
         let x = self.impulse;
         self.impulse = 0.0;
+        if self.bloom_pending > 0.0 {
+            if self.bloom_wait == 0 {
+                self.impulse_hi = self.bloom_pending;
+                self.bloom_pending = 0.0;
+            } else {
+                self.bloom_wait -= 1;
+            }
+        }
+        let x_hi = self.impulse_hi;
+        self.impulse_hi = 0.0;
         let n = self.p.modes.len().min(MAX_MODES);
         let choking = self.choking;
-        let run = |r: &mut Resonator| {
-            let y = r.b1 * r.y1 - r.b2 * r.y2 + r.g * x;
+        // Bloom weight rises with the mode's place in the list — the
+        // tables put the high partials last — so the second impulse
+        // lands mostly in the top of the spectrum.
+        let inv_n = 1.0 / n.max(1) as f32;
+        let run = |k: usize, r: &mut Resonator| {
+            let w = (k as f32 * inv_n).powi(2);
+            let y = r.b1 * r.y1 - r.b2 * r.y2 + r.g * (x + x_hi * w);
             r.y2 = r.y1;
             r.y1 = y;
             if choking {
@@ -200,19 +258,34 @@ impl Pad {
             y
         };
         let mut sum = 0.0;
-        for r in &mut self.res[..n] {
-            sum += run(r);
+        for (k, r) in self.res[..n].iter_mut().enumerate() {
+            sum += run(k, r);
         }
         if !self.collapsed {
-            for r in &mut self.res[MAX_MODES..MAX_MODES + n] {
-                sum += run(r);
+            for (k, r) in self.res[MAX_MODES..MAX_MODES + n].iter_mut().enumerate() {
+                sum += run(k, r);
             }
         }
 
         if self.rattle > 1e-6 {
             let n = rng.next();
-            sum += (n - self.rattle_prev) * self.rattle;
+            let white = (n - self.rattle_prev) * self.rattle;
             self.rattle_prev = n;
+            let tone = self.p.noise_tone.clamp(0.0, 1.0);
+            if tone > 0.0 {
+                // Broad resonance sliding from ~7 kHz down to ~1.5 kHz
+                // as the burst decays.
+                let frac = (self.rattle / self.rattle0).min(1.0);
+                let fc = 1500.0 + 5500.0 * frac.sqrt();
+                let th = std::f32::consts::TAU * fc / SR;
+                let r = 0.85;
+                let y = n * self.rattle + 2.0 * r * th.cos() * self.wash_y1 - r * r * self.wash_y2;
+                self.wash_y2 = self.wash_y1;
+                self.wash_y1 = y;
+                sum += white * (1.0 - tone) + y * 0.2 * tone;
+            } else {
+                sum += white;
+            }
             self.rattle *= if self.choking {
                 CHOKE
             } else {
@@ -319,6 +392,8 @@ mod tests {
             damp: 1.0,
             noise: 0.0,
             noise_decay: 0.1,
+            noise_tone: 0.0,
+            bloom: 0.0,
             drive: 0.0,
             shimmer: 0.0,
             level: 0.8,
@@ -335,6 +410,8 @@ mod tests {
             damp: 1.0,
             noise: 0.0,
             noise_decay: 0.1,
+            noise_tone: 0.0,
+            bloom: 0.0,
             drive: 0.0,
             shimmer: 0.0,
             level: 0.8,
@@ -351,6 +428,8 @@ mod tests {
             damp: 1.0,
             noise: 1.0,
             noise_decay: 0.025,
+            noise_tone: 0.0,
+            bloom: 0.0,
             drive: 0.0,
             shimmer: 0.0,
             level: 0.4,

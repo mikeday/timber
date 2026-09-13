@@ -9,12 +9,14 @@
 //!
 //! --f0 pins the fundamental when the automatic pick (strongest
 //! component under 400 Hz in the settled ring) lands on an overtone.
-//! `mesh:<kick|snare|tomhi|tom|tomlo>` renders that mesh default (strength
+//! `mesh:<kick|snare|tomhi|tom|tomlo>` or `plate:<ride|crash>` (FD plate) or `cymbal:<ride|crash>` (modal) renders that mesh default (strength
 //! 1.0, or --strength S) as a column, for calibrating against the
 //! recording beside it.
 
 use timber::analyze::{self, Report};
+use timber::cymbal::{self, Cymbal};
 use timber::mesh::{self, Mesh, MeshParams};
+use timber::plate::{self, Plate, PlateParams};
 use timber::util::{Rng, SR};
 
 fn load(path: &str) -> Vec<f32> {
@@ -63,6 +65,29 @@ fn render_mesh(name: &str, strength: f32) -> Vec<f32> {
     (0..(1.5 * SR) as usize).map(|_| m.tick(&mut rng)).collect()
 }
 
+fn render_plate(name: &str, strength: f32) -> Vec<f32> {
+    let (_, p) = plate::default_kit()
+        .into_iter()
+        .find(|(n, _)| *n == name)
+        .unwrap_or_else(|| panic!("no plate '{name}'"));
+    let mut m = Plate::new(PlateParams { level: 1.0, ..p });
+    let mut rng = Rng(3);
+    m.strike(strength);
+    (0..(1.5 * SR) as usize).map(|_| m.tick(&mut rng)).collect()
+}
+
+fn render_cymbal(name: &str, strength: f32) -> Vec<f32> {
+    let (_, p) = cymbal::default_kit()
+        .into_iter()
+        .find(|(n, _)| *n == name)
+        .unwrap_or_else(|| panic!("no cymbal '{name}'"));
+    let modes = std::sync::Arc::new(cymbal::Modes::compute());
+    let mut m = Cymbal::new(modes, PlateParams { level: 1.0, ..p });
+    let mut rng = Rng(3);
+    m.strike(strength);
+    (0..(1.5 * SR) as usize).map(|_| m.tick(&mut rng)).collect()
+}
+
 fn main() {
     let mut f0: Option<f32> = None;
     let mut strength = 1.0f32;
@@ -87,6 +112,14 @@ fn main() {
             if let Some(name) = path.strip_prefix("mesh:") {
                 let hit = analyze::normalize(render_mesh(name, strength));
                 return analyze::report(&format!("mesh:{name}"), &hit, f0);
+            }
+            if let Some(name) = path.strip_prefix("cymbal:") {
+                let hit = analyze::normalize(render_cymbal(name, strength));
+                return analyze::report(&format!("cymbal:{name}"), &hit, f0);
+            }
+            if let Some(name) = path.strip_prefix("plate:") {
+                let hit = analyze::normalize(render_plate(name, strength));
+                return analyze::report(&format!("plate:{name}"), &hit, f0);
             }
             let raw = load(path);
             let mut hit = analyze::normalize(analyze::trim_onset(&raw).to_vec());

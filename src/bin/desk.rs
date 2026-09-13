@@ -14,8 +14,8 @@
 //! tongue surface, a live tube-profile drawing, and a phoneme box that
 //! speaks through timber::speak.
 //!
-//! Keys: Z X C V B N M , . = drums (shift = roll) · 1 2 3 4 5 = mesh drums
-//! (shift = hard hit) · A S D F G H J K =
+//! Keys: Z X C V B N M , . 8 9 = drums (shift = roll) · 1 2 3 4 5 = mesh drums
+//! · 6 7 = cymbals (shift = hard hit) · A S D F G H J K =
 //! pluck strings (finger while bowing; melody while a voice engine is
 //! held or speaking) · Q W E R T = vowels (steer the held engine).
 //! Bow surface: hold, x-offset from center = speed, height = pressure.
@@ -29,7 +29,7 @@ use eframe::egui;
 
 use timber::util::{AtomicF32, Rng, SR};
 use timber::voice::{self, Note, Vowel};
-use timber::{body, drums, mesh, modal, mouth, sing, speak, stream, tract};
+use timber::{body, cymbal, drums, mesh, modal, mouth, sing, speak, stream, tract};
 
 // ---- Lock-free mixer state shared with the audio thread -----------------
 
@@ -76,6 +76,9 @@ enum Msg {
     MeshStrike(usize, f32),
     /// A mesh pad's parameters changed.
     MeshPad(usize, mesh::MeshParams),
+    /// Hit a cymbal with a stick velocity; change its params.
+    CymbalStrike(usize, f32),
+    CymbalPad(usize, cymbal::CymbalParams),
 }
 
 // ---- Audio thread --------------------------------------------------------
@@ -103,6 +106,8 @@ fn start_audio(
     string_freqs: Vec<f32>,
     pads: Vec<drums::PadParams>,
     mesh_pads: Vec<mesh::MeshParams>,
+    cymbal_pads: Vec<cymbal::CymbalParams>,
+    modes: Arc<cymbal::Modes>,
 ) -> cpal::Stream {
     let device = cpal::default_host()
         .default_output_device()
@@ -125,6 +130,7 @@ fn start_audio(
     let mut bank = stream::Bank::new(&string_freqs);
     let mut kit = drums::Kit::new(pads);
     let mut heads = mesh::Kit::new(mesh_pads);
+    let mut cymbals = cymbal::Kit::new(modes, cymbal_pads);
     let mut mouth = mouth::Mouth::new();
     let mut tube = tract::Tract::new();
     let mut utter: Option<speak::Utterance> = None;
@@ -156,6 +162,8 @@ fn start_audio(
                         Msg::Speak(segs) => utter = speak::Utterance::new(segs),
                         Msg::MeshStrike(i, strength) => heads.strike(i, strength),
                         Msg::MeshPad(i, params) => heads.set_params(i, params),
+                        Msg::CymbalStrike(i, strength) => cymbals.strike(i, strength),
+                        Msg::CymbalPad(i, params) => cymbals.set_params(i, params),
                         Msg::Knock(i) => {
                             let sel = mixer.strips[i].body.load(Relaxed).min(bodies[i].len() - 1);
                             if sel > 0 {
@@ -214,7 +222,8 @@ fn start_audio(
                         true
                     });
                     sums[STRING] += bank.tick(&p);
-                    sums[DRUMS] += kit.tick(&mut rng) + heads.tick(&mut rng);
+                    sums[DRUMS] +=
+                        kit.tick(&mut rng) + heads.tick(&mut rng) + cymbals.tick(&mut rng);
                     sums[VOICE] += mouth.tick(&mp, &mut rng);
                     // A running utterance overrides the pad's
                     // articulation; pitch/level stay live. Release
@@ -280,6 +289,8 @@ enum ModeSet {
     Center,
     Bell,
     Triangle,
+    Cymbal,
+    Ride,
     NoiseOnly,
 }
 
@@ -290,6 +301,8 @@ impl ModeSet {
             ModeSet::Center => modal::MEMBRANE_CENTER,
             ModeSet::Bell => modal::BELL,
             ModeSet::Triangle => modal::TRIANGLE,
+            ModeSet::Cymbal => modal::CYMBAL,
+            ModeSet::Ride => modal::RIDE,
             ModeSet::NoiseOnly => &[],
         }
     }
@@ -299,6 +312,8 @@ impl ModeSet {
             ModeSet::Center => "membrane (center hit)",
             ModeSet::Bell => "bell",
             ModeSet::Triangle => "triangle (rod)",
+            ModeSet::Cymbal => "cymbal (synth)",
+            ModeSet::Ride => "ride (synth)",
             ModeSet::NoiseOnly => "noise only",
         }
     }
@@ -314,6 +329,8 @@ struct DrumParams {
     damp: f32,
     noise: f32,
     noise_decay: f32,
+    noise_tone: f32,
+    bloom: f32,
     drive: f32,
     shimmer: f32,
     level: f32,
@@ -330,6 +347,8 @@ impl DrumParams {
             damp: self.damp,
             noise: self.noise,
             noise_decay: self.noise_decay,
+            noise_tone: self.noise_tone,
+            bloom: self.bloom,
             drive: self.drive,
             shimmer: self.shimmer,
             level: self.level,
@@ -348,6 +367,8 @@ fn default_pads() -> Vec<DrumParams> {
         damp: 1.0,
         noise: 0.0,
         noise_decay: 0.1,
+        noise_tone: 0.0,
+        bloom: 0.0,
         drive: 0.0,
         shimmer: 0.0,
         level: 0.85,
@@ -435,6 +456,38 @@ fn default_pads() -> Vec<DrumParams> {
             level: 0.5,
             ..base
         },
+        // Synth cymbals: the CYMBAL partial table with the pad's noise
+        // burst as the wash. The crash is mostly wash, the ride mostly
+        // partials with a short sizzle.
+        DrumParams {
+            name: "crash",
+            modes: ModeSet::Cymbal,
+            freq: 450.0,
+            damp: 1.0,
+            noise: 0.6,
+            noise_decay: 0.7,
+            noise_tone: 1.0,
+            bloom: 0.8,
+            drive: 0.6,
+            shimmer: 0.4,
+            level: 0.45,
+            ..base
+        },
+        DrumParams {
+            name: "ride",
+            modes: ModeSet::Ride,
+            freq: 340.0,
+            damp: 2.0,
+            noise: 0.4,
+            noise_decay: 0.15,
+            noise_tone: 0.8,
+            bloom: 0.3,
+            // High: the ride's partials ring for seconds, and a slow
+            // beat on a long partial is a wah, not a shimmer.
+            shimmer: 1.0,
+            level: 0.45,
+            ..base
+        },
     ]
 }
 
@@ -450,7 +503,7 @@ const VOWELS: [(&str, Vowel); 5] = [
 /// one (shift can change the logical key on some layouts — QWERTZ turns
 /// shift+',' into ';' — which would strand roll state). Must stay in
 /// step with default_pads(): asserted at startup.
-const DRUM_KEYS: [egui::Key; 9] = [
+const DRUM_KEYS: [egui::Key; 11] = [
     egui::Key::Z,
     egui::Key::X,
     egui::Key::C,
@@ -460,6 +513,8 @@ const DRUM_KEYS: [egui::Key; 9] = [
     egui::Key::M,
     egui::Key::Comma,
     egui::Key::Period,
+    egui::Key::Num8,
+    egui::Key::Num9,
 ];
 const NPADS: usize = DRUM_KEYS.len();
 /// Mesh pads: number row. Shift = a hard hit (the tension glide and
@@ -472,6 +527,9 @@ const MESH_KEYS: [egui::Key; 5] = [
     egui::Key::Num5,
 ];
 const NMESH: usize = MESH_KEYS.len();
+/// Cymbal pads: 6 7. Shift = hard hit.
+const CYMBAL_KEYS: [egui::Key; 2] = [egui::Key::Num6, egui::Key::Num7];
+const NCYMBAL: usize = CYMBAL_KEYS.len();
 const NOTE_KEYS: [egui::Key; 8] = [
     egui::Key::A,
     egui::Key::S,
@@ -520,6 +578,8 @@ struct Desk {
     pad_sel: usize,
     mesh_pads: Vec<(&'static str, mesh::MeshParams)>,
     mesh_sel: usize,
+    cymbal_pads: Vec<(&'static str, cymbal::CymbalParams)>,
+    cymbal_sel: usize,
     rolling: [bool; NPADS],
     drum_down: [bool; NPADS],
     last_mouth_pos: Option<egui::Pos2>,
@@ -540,6 +600,12 @@ impl Desk {
         self.mesh_sel = pad;
         let strength = if hard { 1.6 } else { 0.8 };
         let _ = self.tx.send(Msg::MeshStrike(pad, strength));
+    }
+
+    fn strike_cymbal(&mut self, pad: usize, hard: bool) {
+        self.cymbal_sel = pad;
+        let strength = if hard { 1.6 } else { 0.8 };
+        let _ = self.tx.send(Msg::CymbalStrike(pad, strength));
     }
 
     fn pluck(&mut self, string: usize) {
@@ -645,6 +711,8 @@ impl eframe::App for Desk {
                 } else if *pressed && !*repeat {
                     if let Some(k) = MESH_KEYS.iter().position(|d| *d == key) {
                         acts.push((if i.modifiers.shift { 4 } else { 3 }, k));
+                    } else if let Some(k) = CYMBAL_KEYS.iter().position(|d| *d == key) {
+                        acts.push((if i.modifiers.shift { 6 } else { 5 }, k));
                     } else if let Some(k) = NOTE_KEYS.iter().position(|d| *d == key) {
                         acts.push((1, k));
                     } else if let Some(k) = VOWEL_KEYS.iter().position(|d| *d == key) {
@@ -667,6 +735,8 @@ impl eframe::App for Desk {
                 0 => self.strike(k),
                 3 => self.strike_mesh(k, false),
                 4 => self.strike_mesh(k, true),
+                5 => self.strike_cymbal(k, false),
+                6 => self.strike_cymbal(k, true),
                 // Left hand fingers, right hand excites: while the bow
                 // is on the string, a key only changes the fingered
                 // note under the sustained stroke — no pluck. With the
@@ -769,8 +839,9 @@ impl eframe::App for Desk {
                 });
             }
             ui.separator();
-            ui.small("Z X C V B N M , . — drums (shift = roll)");
+            ui.small("Z X C V B N M , . 8 9 — drums (shift = roll)");
             ui.small("1 2 3 4 5 — mesh drums (shift = hard hit)");
+            ui.small("6 7 — cymbals (shift = hard hit)");
             ui.small("A S D F G H J K — pluck (finger, while bowing)");
             ui.small("Q W E R T — vowels");
             ui.small("hold bow surface — bow");
@@ -778,352 +849,160 @@ impl eframe::App for Desk {
         });
 
         egui::CentralPanel::default().show(ctx, |ui| {
-            ui.columns(3, |cols| {
-                // ---- Drums.
-                let ui = &mut cols[0];
-                ui.heading("drums · modal");
-                let mut strikes = Vec::new();
-                ui.horizontal_wrapped(|ui| {
-                    for (i, p) in self.pads.iter().enumerate() {
-                        if ui.selectable_label(self.pad_sel == i, p.name).clicked() {
-                            strikes.push(i);
-                        }
-                    }
-                });
-                for i in strikes {
-                    self.strike(i);
-                }
-                ui.separator();
-                let p = &mut self.pads[self.pad_sel];
-                // Response-based edit detection: comparing the struct
-                // before/after would mistake egui's clamp-on-show for a
-                // user edit (the silent-retune bug).
-                let mut edited = false;
-                ui.label(format!("editing: {}", p.name));
-                egui::ComboBox::from_label("object")
-                    .width((ui.available_width() - 130.0).clamp(80.0, 160.0))
-                    .selected_text(p.modes.name())
-                    .show_ui(ui, |ui| {
-                        for m in [
-                            ModeSet::Membrane,
-                            ModeSet::Center,
-                            ModeSet::Bell,
-                            ModeSet::Triangle,
-                            ModeSet::NoiseOnly,
-                        ] {
-                            edited |= ui.selectable_value(&mut p.modes, m, m.name()).changed();
-                        }
-                    });
-                // Range must still contain every pad's default: egui
-                // clamps an out-of-range value on display, silently
-                // mutating the stored param (shipped on the next real
-                // edit). The Response-based `edited` flag keeps the
-                // clamp itself from *triggering* a send — the original
-                // "mwup" bug — but not from corrupting the value.
-                edited |= slider(ui, &mut p.freq, 25.0..=2400.0, true, "freq");
-                edited |= slider(ui, &mut p.glide, 0.0..=1.5, false, "pitch glide");
-                edited |= slider(ui, &mut p.glide_time, 0.01..=0.5, true, "glide time");
-                // Floor low enough to be a hand grabbing the metal: at
-                // 0.02 a six-second triangle mode dies in ~0.1s.
-                edited |= slider(ui, &mut p.damp, 0.02..=3.0, true, "muffle");
-                edited |= slider(ui, &mut p.noise, 0.0..=1.0, false, "rattle");
-                edited |= slider(ui, &mut p.noise_decay, 0.002..=0.5, true, "rattle decay");
-                edited |= slider(ui, &mut p.drive, 0.0..=6.0, false, "drive");
-                edited |= slider(ui, &mut p.shimmer, 0.0..=1.0, false, "shimmer");
-                edited |= slider(ui, &mut p.level, 0.0..=1.0, false, "level");
-                let mut chokes = p.choke.is_some();
-                if ui.checkbox(&mut chokes, "choke group").changed() {
-                    p.choke = if chokes { Some(0) } else { None };
-                    edited = true;
-                }
-                // Ship changed params to the ringing pad — knob moves
-                // land on sounds already in the air.
-                if edited {
-                    let _ = self.tx.send(Msg::Pad(self.pad_sel, p.to_pad()));
-                }
-
-                // ---- Mesh drums: the membrane as a membrane.
-                ui.separator();
-                ui.heading("drums · mesh");
-                let mut hits = Vec::new();
-                ui.horizontal_wrapped(|ui| {
-                    for (i, (name, _)) in self.mesh_pads.iter().enumerate() {
-                        let r = ui.selectable_label(self.mesh_sel == i, *name);
-                        if r.clicked() {
-                            hits.push((i, ui.input(|inp| inp.modifiers.shift)));
-                        }
-                    }
-                });
-                for (i, hard) in hits {
-                    self.strike_mesh(i, hard);
-                }
-                let (name, m) = &mut self.mesh_pads[self.mesh_sel];
-                let mut edited = false;
-                ui.label(format!("editing: {name}"));
-                edited |= slider(ui, &mut m.freq, 30.0..=400.0, true, "freq");
-                edited |= slider(ui, &mut m.decay, 0.05..=3.0, true, "decay");
-                edited |= slider(ui, &mut m.hf_damp, 0.0..=0.95, false, "overtone damp");
-                edited |= slider(ui, &mut m.tension, 0.0..=80.0, false, "tension");
-                edited |= slider(ui, &mut m.strike_pos, 0.0..=1.0, false, "strike pos");
-                edited |= slider(ui, &mut m.rattle, 0.0..=1.0, false, "rattle");
-                edited |= slider(ui, &mut m.click, 0.0..=1.0, false, "beater click");
-                edited |= slider(ui, &mut m.drive, 0.0..=6.0, false, "drive");
-                edited |= slider(ui, &mut m.air, 0.0..=1.5, false, "shell air");
-                edited |= slider(ui, &mut m.reso_freq, 25.0..=300.0, true, "reso head");
-                edited |= slider(ui, &mut m.reso_decay, 0.05..=3.0, true, "reso decay");
-                edited |= slider(ui, &mut m.hardness, 0.0..=1.0, false, "stick hardness");
-                edited |= slider(ui, &mut m.mallet, 0.8..=5.0, false, "mallet size");
-                edited |= slider(ui, &mut m.level, 0.0..=4.0, false, "level");
-                if edited {
-                    let _ = self.tx.send(Msg::MeshPad(self.mesh_sel, *m));
-                }
-
-                // ---- Strings.
-                let ui = &mut cols[1];
-                ui.heading("string · streaming");
-                let mut plucks = Vec::new();
-                ui.horizontal_wrapped(|ui| {
-                    for (i, (name, _)) in NOTES.iter().enumerate() {
-                        if ui.button(*name).clicked() {
-                            plucks.push(i);
-                        }
-                    }
-                });
-                for i in plucks {
-                    self.pluck(i);
-                }
-                ui.separator();
-                ctl_slider(ui, &self.ctl.decay, 0.95..=0.9995, false, "decay");
-                ctl_slider(ui, &self.ctl.damping, 0.0..=1.0, false, "damping");
-                ctl_slider(ui, &self.ctl.pluck_pos, 0.0..=0.5, false, "pluck pos");
-                ctl_slider(ui, &self.ctl.stiffness, 0.0..=0.9, false, "stiffness");
-                ctl_slider(ui, &self.ctl.couple, 0.0..=0.01, false, "sympathy");
-                ctl_slider(ui, &self.ctl.level, 0.0..=1.0, false, "level");
-                ui.separator();
-
-                // ---- The bow: hold on the surface. Horizontal *position*
-                // is bow speed — right of center bows forward, left bows
-                // back, the middle rests the bow on the string (which
-                // damps it, as a real resting bow does). Height is
-                // pressure. Position instead of drag velocity because a
-                // trackpad is 10cm of glass standing in for 70cm of bow
-                // hair: sustained strokes must not require sustained
-                // motion, and a bow *change* should be a deliberate
-                // crossing of the center, not every scrub reversal.
-                let bowed = self.ctl.bow_string.load(Relaxed);
-                let mut drone = self.ctl.drone.load(Relaxed);
-                if ui
-                    .checkbox(&mut drone, "drone — bow all strings at once")
-                    .changed()
-                {
-                    self.ctl.drone.store(drone, Relaxed);
-                }
-                ui.label(if drone {
-                    "bow — all strings (hold: ⇄ = speed, height = pressure)".to_string()
-                } else {
-                    format!(
-                        "bow — {} (hold: ⇄ from center = speed, height = pressure)",
-                        NOTES[bowed].0
-                    )
-                });
-                let h = 80.0;
-                let (rect, resp) = ui
-                    .allocate_exact_size(egui::vec2(ui.available_width(), h), egui::Sense::drag());
-                let painter = ui.painter_at(rect);
-                painter.rect_filled(rect, 4.0, ui.visuals().extreme_bg_color);
-                if let Ok(shape) = self.scope.lock() {
-                    let pts: Vec<egui::Pos2> = shape
-                        .iter()
-                        .enumerate()
-                        .map(|(i, s)| {
-                            egui::pos2(
-                                rect.left() + rect.width() * i as f32 / (shape.len() - 1) as f32,
-                                rect.center().y - s.clamp(-1.2, 1.2) * (h * 0.42),
-                            )
-                        })
-                        .collect();
-                    painter.add(egui::Shape::line(
-                        pts,
-                        egui::Stroke::new(1.5, egui::Color32::from_rgb(130, 190, 255)),
-                    ));
-                }
-                // Center line: the bow at rest.
-                painter.vline(
-                    rect.center().x,
-                    rect.y_range(),
-                    egui::Stroke::new(1.0, ui.visuals().weak_text_color()),
-                );
-                let held = resp.dragged() || resp.is_pointer_button_down_on();
-                let pos = resp.interact_pointer_pos();
-                if held && let Some(pos) = pos {
-                    let x = ((pos.x - rect.center().x) / (rect.width() * 0.5)).clamp(-1.0, 1.0);
-                    // Small dead zone: resting the bow, not moving it.
-                    let speed = if x.abs() < 0.06 { 0.0 } else { x * 1.1 };
-                    let pressure = ((pos.y - rect.top()) / h).clamp(0.05, 1.0);
-                    painter.circle_filled(
-                        pos.clamp(rect.min, rect.max),
-                        4.0,
-                        egui::Color32::from_rgb(255, 180, 90),
-                    );
-                    self.ctl.bow_speed.set(speed);
-                    self.ctl.bow_pressure.set(pressure);
-                    self.ctl.bow_on.store(true, Relaxed);
-                } else {
-                    self.ctl.bow_on.store(false, Relaxed);
-                }
-
-                // ---- Voice.
-                let ui = &mut cols[2];
-                ui.heading("voice · formant");
-                let sing_now = ui.button("sing").clicked();
-                egui::ComboBox::from_label("from")
-                    .selected_text(VOWELS[self.from_vowel].0)
-                    .show_ui(ui, |ui| {
-                        for (i, (name, _)) in VOWELS.iter().enumerate() {
-                            ui.selectable_value(&mut self.from_vowel, i, *name);
-                        }
-                    });
-                egui::ComboBox::from_label("to")
-                    .selected_text(VOWELS[self.to_vowel].0)
-                    .show_ui(ui, |ui| {
-                        for (i, (name, _)) in VOWELS.iter().enumerate() {
-                            ui.selectable_value(&mut self.to_vowel, i, *name);
-                        }
-                    });
-                slider(ui, &mut self.voice_freq, 70.0..=400.0, true, "pitch");
-                slider(ui, &mut self.note.duration, 0.15..=3.0, true, "duration");
-                slider(
-                    ui,
-                    &mut self.note.glide_time,
-                    0.02..=0.6,
-                    true,
-                    "vowel glide",
-                );
-                slider(ui, &mut self.note.vibrato, 0.0..=0.03, false, "vibrato");
-                slider(ui, &mut self.note.breath, 0.0..=1.0, false, "breath");
-                slider(ui, &mut self.note.level, 0.0..=1.0, false, "level");
-                if sing_now {
-                    self.sing(self.from_vowel, self.to_vowel);
-                }
-                // The streaming mouth shares the sliders' settings.
-                self.mouth.freq.set(self.voice_freq);
-                self.mouth.breath.set(self.note.breath);
-                self.mouth.vibrato.set(self.note.vibrato);
-                self.mouth.level.set(self.note.level);
-                self.tract.freq.set(self.voice_freq);
-                self.tract.breath.set(self.note.breath);
-                self.tract.vibrato.set(self.note.vibrato);
-                self.tract.level.set(self.note.level);
-                ui.separator();
-                let was_tract = self.tract_mode;
-                ui.checkbox(&mut self.tract_mode, "tract engine (Kelly-Lochbaum)");
-                if was_tract != self.tract_mode {
-                    self.mouth.gate.store(false, Relaxed);
-                    self.tract.gate.store(false, Relaxed);
-                    self.last_mouth_pos = None;
-                    // An empty utterance stops any running speech — the
-                    // hidden engine must not keep talking.
-                    let _ = self.tx.send(Msg::Speak(Vec::new()));
-                }
-                if self.tract_mode {
-                    // ---- The tract: a tube you sculpt. Drag = tongue
-                    // (x along the mouth, y toward closure); the drawn
-                    // profile IS the tube the audio thread scatters
-                    // through. The pad's range stays below frication
-                    // (a tongue can't sustain a gas jet) — consonants
-                    // belong to the phoneme box.
-                    ctl_slider(ui, &self.tract.lips, 0.0..=1.0, false, "lips");
-                    // Nasalized vowels on demand: hold a vowel and open
-                    // the nose.
-                    ctl_slider(ui, &self.tract.velum, 0.0..=1.0, false, "velum");
-                    ui.horizontal(|ui| {
-                        if ui.button("speak").clicked() {
-                            let segs = speak::phrase(&self.phrase);
-                            if !segs.is_empty() {
-                                let _ = self.tx.send(Msg::Speak(segs));
+            // Three kits and a voice no longer fit a laptop screen.
+            egui::ScrollArea::vertical().show(ui, |ui| {
+                ui.columns(3, |cols| {
+                    // ---- Drums.
+                    let ui = &mut cols[0];
+                    ui.heading("drums · modal");
+                    let mut strikes = Vec::new();
+                    ui.horizontal_wrapped(|ui| {
+                        for (i, p) in self.pads.iter().enumerate() {
+                            if ui.selectable_label(self.pad_sel == i, p.name).clicked() {
+                                strikes.push(i);
                             }
                         }
-                        // The 1961 tribute. The pitch slider transposes.
-                        if ui.button("♪ daisy").clicked() {
-                            let _ = self.tx.send(Msg::Speak(sing::daisy()));
-                        }
-                        ui.add(
-                            egui::TextEdit::singleline(&mut self.phrase)
-                                .desired_width(ui.available_width()),
-                        )
-                        .on_hover_text(
-                            "phonemes: a e i o u w y h l r s sh f z p b t d k g, '.' pause",
-                        );
                     });
-                    ui.label("tract — hold to sing: ⇄ tongue back/front, ↓ raise tongue");
-                    // The pad maps onto constriction 0..CONSTRICT_MAX:
-                    // a tongue can press to frication, but not sustain
-                    // the pinhole gas-jet regime beyond it — that zone
-                    // is clamped out of the UI, not out of the model.
-                    const CONSTRICT_MAX: f32 = 0.87;
-                    let h = 80.0;
-                    let (rect, resp) = ui.allocate_exact_size(
-                        egui::vec2(ui.available_width(), h),
-                        egui::Sense::drag(),
-                    );
-                    let painter = ui.painter_at(rect);
-                    painter.rect_filled(rect, 4.0, ui.visuals().extreme_bg_color);
-                    let d = tract::diameters(
-                        self.tract.tongue_pos.get(),
-                        self.tract.constrict.get(),
-                        self.tract.lips.get(),
-                        0.0,
-                    );
-                    let mut top = Vec::with_capacity(tract::N);
-                    let mut bot = Vec::with_capacity(tract::N);
-                    for (i, di) in d.iter().enumerate() {
-                        let x = rect.left() + rect.width() * i as f32 / (tract::N - 1) as f32;
-                        let half = di / 1.6 * (h * 0.42);
-                        top.push(egui::pos2(x, rect.center().y - half));
-                        bot.push(egui::pos2(x, rect.center().y + half));
+                    for i in strikes {
+                        self.strike(i);
                     }
-                    let stroke = egui::Stroke::new(1.5, egui::Color32::from_rgb(130, 190, 255));
-                    painter.add(egui::Shape::line(top, stroke));
-                    painter.add(egui::Shape::line(bot, stroke));
-                    for (name, tp, con, _) in tract::VOWELS {
-                        painter.text(
-                            egui::pos2(
-                                rect.left() + rect.width() * tp,
-                                rect.top() + h * con / CONSTRICT_MAX,
-                            ),
-                            egui::Align2::CENTER_CENTER,
-                            name,
-                            egui::FontId::proportional(11.0),
-                            ui.visuals().weak_text_color(),
-                        );
+                    ui.separator();
+                    let p = &mut self.pads[self.pad_sel];
+                    // Response-based edit detection: comparing the struct
+                    // before/after would mistake egui's clamp-on-show for a
+                    // user edit (the silent-retune bug).
+                    let mut edited = false;
+                    ui.label(format!("editing: {}", p.name));
+                    egui::ComboBox::from_label("object")
+                        .width((ui.available_width() - 130.0).clamp(80.0, 160.0))
+                        .selected_text(p.modes.name())
+                        .show_ui(ui, |ui| {
+                            for m in [
+                                ModeSet::Membrane,
+                                ModeSet::Center,
+                                ModeSet::Bell,
+                                ModeSet::Triangle,
+                                ModeSet::Cymbal,
+                                ModeSet::Ride,
+                                ModeSet::NoiseOnly,
+                            ] {
+                                edited |= ui.selectable_value(&mut p.modes, m, m.name()).changed();
+                            }
+                        });
+                    // Range must still contain every pad's default: egui
+                    // clamps an out-of-range value on display, silently
+                    // mutating the stored param (shipped on the next real
+                    // edit). The Response-based `edited` flag keeps the
+                    // clamp itself from *triggering* a send — the original
+                    // "mwup" bug — but not from corrupting the value.
+                    edited |= slider(ui, &mut p.freq, 25.0..=2400.0, true, "freq");
+                    edited |= slider(ui, &mut p.glide, 0.0..=1.5, false, "pitch glide");
+                    edited |= slider(ui, &mut p.glide_time, 0.01..=0.5, true, "glide time");
+                    // Floor low enough to be a hand grabbing the metal: at
+                    // 0.02 a six-second triangle mode dies in ~0.1s.
+                    edited |= slider(ui, &mut p.damp, 0.02..=3.0, true, "muffle");
+                    edited |= slider(ui, &mut p.noise, 0.0..=1.0, false, "rattle");
+                    edited |= slider(ui, &mut p.noise_decay, 0.002..=1.5, true, "rattle decay");
+                    edited |= slider(ui, &mut p.noise_tone, 0.0..=1.0, false, "rattle tone");
+                    edited |= slider(ui, &mut p.bloom, 0.0..=1.0, false, "wash bloom");
+                    edited |= slider(ui, &mut p.drive, 0.0..=6.0, false, "drive");
+                    edited |= slider(ui, &mut p.shimmer, 0.0..=1.0, false, "shimmer");
+                    edited |= slider(ui, &mut p.level, 0.0..=1.0, false, "level");
+                    let mut chokes = p.choke.is_some();
+                    if ui.checkbox(&mut chokes, "choke group").changed() {
+                        p.choke = if chokes { Some(0) } else { None };
+                        edited = true;
                     }
-                    if (resp.dragged() || resp.is_pointer_button_down_on())
-                        && let Some(pos) = resp.interact_pointer_pos()
-                    {
-                        if self.last_mouth_pos.is_none_or(|p| p.distance(pos) > 1.0) {
-                            self.last_mouth_pos = Some(pos);
-                            let x = ((pos.x - rect.left()) / rect.width()).clamp(0.0, 1.0);
-                            let y = ((pos.y - rect.top()) / h).clamp(0.0, 1.0);
-                            self.tract.tongue_pos.set(x);
-                            self.tract.constrict.set(y * CONSTRICT_MAX);
+                    // Ship changed params to the ringing pad — knob moves
+                    // land on sounds already in the air.
+                    if edited {
+                        let _ = self.tx.send(Msg::Pad(self.pad_sel, p.to_pad()));
+                    }
+
+                    // ---- Mesh drums: the membrane as a membrane.
+                    ui.separator();
+                    ui.heading("drums · mesh");
+                    let mut hits = Vec::new();
+                    ui.horizontal_wrapped(|ui| {
+                        for (i, (name, _)) in self.mesh_pads.iter().enumerate() {
+                            let r = ui.selectable_label(self.mesh_sel == i, *name);
+                            if r.clicked() {
+                                hits.push((i, ui.input(|inp| inp.modifiers.shift)));
+                            }
                         }
-                        self.tract.gate.store(true, Relaxed);
-                        let marker = egui::pos2(
-                            rect.left() + rect.width() * self.tract.tongue_pos.get(),
-                            rect.top() + h * self.tract.constrict.get() / CONSTRICT_MAX,
-                        );
-                        painter.circle_filled(marker, 4.0, egui::Color32::from_rgb(255, 180, 90));
+                    });
+                    for (i, hard) in hits {
+                        self.strike_mesh(i, hard);
+                    }
+                    let (name, m) = &mut self.mesh_pads[self.mesh_sel];
+                    let mut edited = false;
+                    ui.label(format!("editing: {name}"));
+                    edited |= slider(ui, &mut m.freq, 30.0..=400.0, true, "freq");
+                    edited |= slider(ui, &mut m.decay, 0.05..=3.0, true, "decay");
+                    edited |= slider(ui, &mut m.hf_damp, 0.0..=0.95, false, "overtone damp");
+                    edited |= slider(ui, &mut m.tension, 0.0..=80.0, false, "tension");
+                    edited |= slider(ui, &mut m.strike_pos, 0.0..=1.0, false, "strike pos");
+                    edited |= slider(ui, &mut m.rattle, 0.0..=1.0, false, "rattle");
+                    edited |= slider(ui, &mut m.click, 0.0..=1.0, false, "beater click");
+                    edited |= slider(ui, &mut m.drive, 0.0..=6.0, false, "drive");
+                    edited |= slider(ui, &mut m.air, 0.0..=1.5, false, "shell air");
+                    edited |= slider(ui, &mut m.reso_freq, 25.0..=300.0, true, "reso head");
+                    edited |= slider(ui, &mut m.reso_decay, 0.05..=3.0, true, "reso decay");
+                    edited |= slider(ui, &mut m.hardness, 0.0..=1.0, false, "stick hardness");
+                    edited |= slider(ui, &mut m.mallet, 0.8..=5.0, false, "mallet size");
+                    edited |= slider(ui, &mut m.level, 0.0..=4.0, false, "level");
+                    if edited {
+                        let _ = self.tx.send(Msg::MeshPad(self.mesh_sel, *m));
+                    }
+
+                    // ---- Strings.
+                    let ui = &mut cols[1];
+                    ui.heading("string · streaming");
+                    let mut plucks = Vec::new();
+                    ui.horizontal_wrapped(|ui| {
+                        for (i, (name, _)) in NOTES.iter().enumerate() {
+                            if ui.button(*name).clicked() {
+                                plucks.push(i);
+                            }
+                        }
+                    });
+                    for i in plucks {
+                        self.pluck(i);
+                    }
+                    ui.separator();
+                    ctl_slider(ui, &self.ctl.decay, 0.95..=0.9995, false, "decay");
+                    ctl_slider(ui, &self.ctl.damping, 0.0..=1.0, false, "damping");
+                    ctl_slider(ui, &self.ctl.pluck_pos, 0.0..=0.5, false, "pluck pos");
+                    ctl_slider(ui, &self.ctl.stiffness, 0.0..=0.9, false, "stiffness");
+                    ctl_slider(ui, &self.ctl.couple, 0.0..=0.01, false, "sympathy");
+                    ctl_slider(ui, &self.ctl.level, 0.0..=1.0, false, "level");
+                    ui.separator();
+
+                    // ---- The bow: hold on the surface. Horizontal *position*
+                    // is bow speed — right of center bows forward, left bows
+                    // back, the middle rests the bow on the string (which
+                    // damps it, as a real resting bow does). Height is
+                    // pressure. Position instead of drag velocity because a
+                    // trackpad is 10cm of glass standing in for 70cm of bow
+                    // hair: sustained strokes must not require sustained
+                    // motion, and a bow *change* should be a deliberate
+                    // crossing of the center, not every scrub reversal.
+                    let bowed = self.ctl.bow_string.load(Relaxed);
+                    let mut drone = self.ctl.drone.load(Relaxed);
+                    if ui
+                        .checkbox(&mut drone, "drone — bow all strings at once")
+                        .changed()
+                    {
+                        self.ctl.drone.store(drone, Relaxed);
+                    }
+                    ui.label(if drone {
+                        "bow — all strings (hold: ⇄ = speed, height = pressure)".to_string()
                     } else {
-                        self.tract.gate.store(false, Relaxed);
-                        self.last_mouth_pos = None;
-                    }
-                } else {
-                    // ---- The mouth: hold to phonate, steer through the
-                    // phonetician's vowel plane — left/right is tongue
-                    // position (F2, front vowels left), up/down is jaw
-                    // openness (F1). The named vowels are landmarks in a
-                    // continuous space, not the only options.
-                    ui.label("mouth — hold to sing, drag between vowels");
+                        format!(
+                            "bow — {} (hold: ⇄ from center = speed, height = pressure)",
+                            NOTES[bowed].0
+                        )
+                    });
                     let h = 80.0;
                     let (rect, resp) = ui.allocate_exact_size(
                         egui::vec2(ui.available_width(), h),
@@ -1131,52 +1010,291 @@ impl eframe::App for Desk {
                     );
                     let painter = ui.painter_at(rect);
                     painter.rect_filled(rect, 4.0, ui.visuals().extreme_bg_color);
-                    let (f1_lo, f1_hi) = mouth::F1_RANGE;
-                    let (f2_lo, f2_hi) = mouth::F2_RANGE;
-                    let to_pos = |f1: f32, f2: f32| {
-                        egui::pos2(
-                            rect.left() + rect.width() * (f2_hi / f2).ln() / (f2_hi / f2_lo).ln(),
-                            rect.top() + rect.height() * (f1 / f1_lo).ln() / (f1_hi / f1_lo).ln(),
-                        )
-                    };
-                    for (name, v) in &VOWELS {
-                        let (f1, _, _) = v.0[0];
-                        let (f2, _, _) = v.0[1];
-                        painter.text(
-                            to_pos(f1, f2),
-                            egui::Align2::CENTER_CENTER,
-                            *name,
-                            egui::FontId::proportional(12.0),
-                            ui.visuals().weak_text_color(),
-                        );
+                    if let Ok(shape) = self.scope.lock() {
+                        let pts: Vec<egui::Pos2> = shape
+                            .iter()
+                            .enumerate()
+                            .map(|(i, s)| {
+                                egui::pos2(
+                                    rect.left()
+                                        + rect.width() * i as f32 / (shape.len() - 1) as f32,
+                                    rect.center().y - s.clamp(-1.2, 1.2) * (h * 0.42),
+                                )
+                            })
+                            .collect();
+                        painter.add(egui::Shape::line(
+                            pts,
+                            egui::Stroke::new(1.5, egui::Color32::from_rgb(130, 190, 255)),
+                        ));
                     }
-                    if (resp.dragged() || resp.is_pointer_button_down_on())
-                        && let Some(pos) = resp.interact_pointer_pos()
-                    {
-                        // Only a *moving* pointer writes the vowel, so the
-                        // Q..T keys can set formants without the resting
-                        // finger instantly overwriting them.
-                        if self.last_mouth_pos.is_none_or(|p| p.distance(pos) > 1.0) {
-                            self.last_mouth_pos = Some(pos);
-                            let x = ((pos.x - rect.left()) / rect.width()).clamp(0.0, 1.0);
-                            let y = ((pos.y - rect.top()) / rect.height()).clamp(0.0, 1.0);
-                            self.mouth.f2.set(f2_hi * (f2_lo / f2_hi).powf(x));
-                            self.mouth.f1.set(f1_lo * (f1_hi / f1_lo).powf(y));
-                        }
-                        self.mouth.gate.store(true, Relaxed);
-                        // The marker shows the *actual* formants — pointer
-                        // and key agree on one source of truth.
-                        let marker = to_pos(self.mouth.f1.get(), self.mouth.f2.get());
+                    // Center line: the bow at rest.
+                    painter.vline(
+                        rect.center().x,
+                        rect.y_range(),
+                        egui::Stroke::new(1.0, ui.visuals().weak_text_color()),
+                    );
+                    let held = resp.dragged() || resp.is_pointer_button_down_on();
+                    let pos = resp.interact_pointer_pos();
+                    if held && let Some(pos) = pos {
+                        let x = ((pos.x - rect.center().x) / (rect.width() * 0.5)).clamp(-1.0, 1.0);
+                        // Small dead zone: resting the bow, not moving it.
+                        let speed = if x.abs() < 0.06 { 0.0 } else { x * 1.1 };
+                        let pressure = ((pos.y - rect.top()) / h).clamp(0.05, 1.0);
                         painter.circle_filled(
-                            marker.clamp(rect.min, rect.max),
+                            pos.clamp(rect.min, rect.max),
                             4.0,
                             egui::Color32::from_rgb(255, 180, 90),
                         );
+                        self.ctl.bow_speed.set(speed);
+                        self.ctl.bow_pressure.set(pressure);
+                        self.ctl.bow_on.store(true, Relaxed);
                     } else {
-                        self.mouth.gate.store(false, Relaxed);
-                        self.last_mouth_pos = None;
+                        self.ctl.bow_on.store(false, Relaxed);
                     }
-                }
+
+                    // ---- Cymbals: the modal plate.
+                    ui.separator();
+                    ui.heading("cymbals · modal plate");
+                    let mut hits = Vec::new();
+                    ui.horizontal_wrapped(|ui| {
+                        for (i, (name, _)) in self.cymbal_pads.iter().enumerate() {
+                            let r = ui.selectable_label(self.cymbal_sel == i, *name);
+                            if r.clicked() {
+                                hits.push((i, ui.input(|inp| inp.modifiers.shift)));
+                            }
+                        }
+                    });
+                    for (i, hard) in hits {
+                        self.strike_cymbal(i, hard);
+                    }
+                    let (name, c) = &mut self.cymbal_pads[self.cymbal_sel];
+                    let mut edited = false;
+                    ui.label(format!("editing: {name}"));
+                    edited |= slider(ui, &mut c.stiffness, 0.0..=1.0, false, "stiffness");
+                    edited |= slider(ui, &mut c.dome, 10.0..=400.0, true, "dome");
+                    edited |= slider(ui, &mut c.decay, 0.1..=12.0, true, "decay");
+                    edited |= slider(ui, &mut c.hf_damp, 0.0..=1.0, false, "hf damp");
+                    edited |= slider(ui, &mut c.strike_pos, 0.0..=1.0, false, "strike pos");
+                    edited |= slider(ui, &mut c.hardness, 0.0..=1.0, false, "stick hardness");
+                    edited |= slider(ui, &mut c.mallet, 0.8..=5.0, false, "mallet size");
+                    edited |= slider(ui, &mut c.nonlin, 1.0..=5000.0, true, "wash (nonlin)");
+                    edited |= slider(ui, &mut c.level, 0.0..=4.0, false, "level");
+                    if edited {
+                        let _ = self.tx.send(Msg::CymbalPad(self.cymbal_sel, *c));
+                    }
+
+                    // ---- Voice.
+                    let ui = &mut cols[2];
+                    ui.heading("voice · formant");
+                    let sing_now = ui.button("sing").clicked();
+                    egui::ComboBox::from_label("from")
+                        .selected_text(VOWELS[self.from_vowel].0)
+                        .show_ui(ui, |ui| {
+                            for (i, (name, _)) in VOWELS.iter().enumerate() {
+                                ui.selectable_value(&mut self.from_vowel, i, *name);
+                            }
+                        });
+                    egui::ComboBox::from_label("to")
+                        .selected_text(VOWELS[self.to_vowel].0)
+                        .show_ui(ui, |ui| {
+                            for (i, (name, _)) in VOWELS.iter().enumerate() {
+                                ui.selectable_value(&mut self.to_vowel, i, *name);
+                            }
+                        });
+                    slider(ui, &mut self.voice_freq, 70.0..=400.0, true, "pitch");
+                    slider(ui, &mut self.note.duration, 0.15..=3.0, true, "duration");
+                    slider(
+                        ui,
+                        &mut self.note.glide_time,
+                        0.02..=0.6,
+                        true,
+                        "vowel glide",
+                    );
+                    slider(ui, &mut self.note.vibrato, 0.0..=0.03, false, "vibrato");
+                    slider(ui, &mut self.note.breath, 0.0..=1.0, false, "breath");
+                    slider(ui, &mut self.note.level, 0.0..=1.0, false, "level");
+                    if sing_now {
+                        self.sing(self.from_vowel, self.to_vowel);
+                    }
+                    // The streaming mouth shares the sliders' settings.
+                    self.mouth.freq.set(self.voice_freq);
+                    self.mouth.breath.set(self.note.breath);
+                    self.mouth.vibrato.set(self.note.vibrato);
+                    self.mouth.level.set(self.note.level);
+                    self.tract.freq.set(self.voice_freq);
+                    self.tract.breath.set(self.note.breath);
+                    self.tract.vibrato.set(self.note.vibrato);
+                    self.tract.level.set(self.note.level);
+                    ui.separator();
+                    let was_tract = self.tract_mode;
+                    ui.checkbox(&mut self.tract_mode, "tract engine (Kelly-Lochbaum)");
+                    if was_tract != self.tract_mode {
+                        self.mouth.gate.store(false, Relaxed);
+                        self.tract.gate.store(false, Relaxed);
+                        self.last_mouth_pos = None;
+                        // An empty utterance stops any running speech — the
+                        // hidden engine must not keep talking.
+                        let _ = self.tx.send(Msg::Speak(Vec::new()));
+                    }
+                    if self.tract_mode {
+                        // ---- The tract: a tube you sculpt. Drag = tongue
+                        // (x along the mouth, y toward closure); the drawn
+                        // profile IS the tube the audio thread scatters
+                        // through. The pad's range stays below frication
+                        // (a tongue can't sustain a gas jet) — consonants
+                        // belong to the phoneme box.
+                        ctl_slider(ui, &self.tract.lips, 0.0..=1.0, false, "lips");
+                        // Nasalized vowels on demand: hold a vowel and open
+                        // the nose.
+                        ctl_slider(ui, &self.tract.velum, 0.0..=1.0, false, "velum");
+                        ui.horizontal(|ui| {
+                            if ui.button("speak").clicked() {
+                                let segs = speak::phrase(&self.phrase);
+                                if !segs.is_empty() {
+                                    let _ = self.tx.send(Msg::Speak(segs));
+                                }
+                            }
+                            // The 1961 tribute. The pitch slider transposes.
+                            if ui.button("♪ daisy").clicked() {
+                                let _ = self.tx.send(Msg::Speak(sing::daisy()));
+                            }
+                            ui.add(
+                                egui::TextEdit::singleline(&mut self.phrase)
+                                    .desired_width(ui.available_width()),
+                            )
+                            .on_hover_text(
+                                "phonemes: a e i o u w y h l r s sh f z p b t d k g, '.' pause",
+                            );
+                        });
+                        ui.label("tract — hold to sing: ⇄ tongue back/front, ↓ raise tongue");
+                        // The pad maps onto constriction 0..CONSTRICT_MAX:
+                        // a tongue can press to frication, but not sustain
+                        // the pinhole gas-jet regime beyond it — that zone
+                        // is clamped out of the UI, not out of the model.
+                        const CONSTRICT_MAX: f32 = 0.87;
+                        let h = 80.0;
+                        let (rect, resp) = ui.allocate_exact_size(
+                            egui::vec2(ui.available_width(), h),
+                            egui::Sense::drag(),
+                        );
+                        let painter = ui.painter_at(rect);
+                        painter.rect_filled(rect, 4.0, ui.visuals().extreme_bg_color);
+                        let d = tract::diameters(
+                            self.tract.tongue_pos.get(),
+                            self.tract.constrict.get(),
+                            self.tract.lips.get(),
+                            0.0,
+                        );
+                        let mut top = Vec::with_capacity(tract::N);
+                        let mut bot = Vec::with_capacity(tract::N);
+                        for (i, di) in d.iter().enumerate() {
+                            let x = rect.left() + rect.width() * i as f32 / (tract::N - 1) as f32;
+                            let half = di / 1.6 * (h * 0.42);
+                            top.push(egui::pos2(x, rect.center().y - half));
+                            bot.push(egui::pos2(x, rect.center().y + half));
+                        }
+                        let stroke = egui::Stroke::new(1.5, egui::Color32::from_rgb(130, 190, 255));
+                        painter.add(egui::Shape::line(top, stroke));
+                        painter.add(egui::Shape::line(bot, stroke));
+                        for (name, tp, con, _) in tract::VOWELS {
+                            painter.text(
+                                egui::pos2(
+                                    rect.left() + rect.width() * tp,
+                                    rect.top() + h * con / CONSTRICT_MAX,
+                                ),
+                                egui::Align2::CENTER_CENTER,
+                                name,
+                                egui::FontId::proportional(11.0),
+                                ui.visuals().weak_text_color(),
+                            );
+                        }
+                        if (resp.dragged() || resp.is_pointer_button_down_on())
+                            && let Some(pos) = resp.interact_pointer_pos()
+                        {
+                            if self.last_mouth_pos.is_none_or(|p| p.distance(pos) > 1.0) {
+                                self.last_mouth_pos = Some(pos);
+                                let x = ((pos.x - rect.left()) / rect.width()).clamp(0.0, 1.0);
+                                let y = ((pos.y - rect.top()) / h).clamp(0.0, 1.0);
+                                self.tract.tongue_pos.set(x);
+                                self.tract.constrict.set(y * CONSTRICT_MAX);
+                            }
+                            self.tract.gate.store(true, Relaxed);
+                            let marker = egui::pos2(
+                                rect.left() + rect.width() * self.tract.tongue_pos.get(),
+                                rect.top() + h * self.tract.constrict.get() / CONSTRICT_MAX,
+                            );
+                            painter.circle_filled(
+                                marker,
+                                4.0,
+                                egui::Color32::from_rgb(255, 180, 90),
+                            );
+                        } else {
+                            self.tract.gate.store(false, Relaxed);
+                            self.last_mouth_pos = None;
+                        }
+                    } else {
+                        // ---- The mouth: hold to phonate, steer through the
+                        // phonetician's vowel plane — left/right is tongue
+                        // position (F2, front vowels left), up/down is jaw
+                        // openness (F1). The named vowels are landmarks in a
+                        // continuous space, not the only options.
+                        ui.label("mouth — hold to sing, drag between vowels");
+                        let h = 80.0;
+                        let (rect, resp) = ui.allocate_exact_size(
+                            egui::vec2(ui.available_width(), h),
+                            egui::Sense::drag(),
+                        );
+                        let painter = ui.painter_at(rect);
+                        painter.rect_filled(rect, 4.0, ui.visuals().extreme_bg_color);
+                        let (f1_lo, f1_hi) = mouth::F1_RANGE;
+                        let (f2_lo, f2_hi) = mouth::F2_RANGE;
+                        let to_pos = |f1: f32, f2: f32| {
+                            egui::pos2(
+                                rect.left()
+                                    + rect.width() * (f2_hi / f2).ln() / (f2_hi / f2_lo).ln(),
+                                rect.top()
+                                    + rect.height() * (f1 / f1_lo).ln() / (f1_hi / f1_lo).ln(),
+                            )
+                        };
+                        for (name, v) in &VOWELS {
+                            let (f1, _, _) = v.0[0];
+                            let (f2, _, _) = v.0[1];
+                            painter.text(
+                                to_pos(f1, f2),
+                                egui::Align2::CENTER_CENTER,
+                                *name,
+                                egui::FontId::proportional(12.0),
+                                ui.visuals().weak_text_color(),
+                            );
+                        }
+                        if (resp.dragged() || resp.is_pointer_button_down_on())
+                            && let Some(pos) = resp.interact_pointer_pos()
+                        {
+                            // Only a *moving* pointer writes the vowel, so the
+                            // Q..T keys can set formants without the resting
+                            // finger instantly overwriting them.
+                            if self.last_mouth_pos.is_none_or(|p| p.distance(pos) > 1.0) {
+                                self.last_mouth_pos = Some(pos);
+                                let x = ((pos.x - rect.left()) / rect.width()).clamp(0.0, 1.0);
+                                let y = ((pos.y - rect.top()) / rect.height()).clamp(0.0, 1.0);
+                                self.mouth.f2.set(f2_hi * (f2_lo / f2_hi).powf(x));
+                                self.mouth.f1.set(f1_lo * (f1_hi / f1_lo).powf(y));
+                            }
+                            self.mouth.gate.store(true, Relaxed);
+                            // The marker shows the *actual* formants — pointer
+                            // and key agree on one source of truth.
+                            let marker = to_pos(self.mouth.f1.get(), self.mouth.f2.get());
+                            painter.circle_filled(
+                                marker.clamp(rect.min, rect.max),
+                                4.0,
+                                egui::Color32::from_rgb(255, 180, 90),
+                            );
+                        } else {
+                            self.mouth.gate.store(false, Relaxed);
+                            self.last_mouth_pos = None;
+                        }
+                    }
+                });
             });
         });
     }
@@ -1232,6 +1350,22 @@ fn main() -> eframe::Result {
         NMESH,
         "MESH_KEYS and mesh::default_kit out of step"
     );
+    // The cymbal's modes and coupling tensor: a second or so of eigen-
+    // decomposition, once.
+    let t0 = std::time::Instant::now();
+    let modes = Arc::new(cymbal::Modes::compute());
+    eprintln!(
+        "cymbal: {} modes, {} coupling terms, {:.1}s",
+        modes.n_modes(),
+        modes.coupling_entries(),
+        t0.elapsed().as_secs_f32()
+    );
+    let cymbal_pads = cymbal::default_kit();
+    assert_eq!(
+        cymbal_pads.len(),
+        NCYMBAL,
+        "CYMBAL_KEYS and cymbal::default_kit out of step"
+    );
     let stream = start_audio(
         mixer.clone(),
         ctl.clone(),
@@ -1242,6 +1376,8 @@ fn main() -> eframe::Result {
         freqs,
         pads.iter().map(|p| p.to_pad()).collect(),
         mesh_pads.iter().map(|(_, m)| *m).collect(),
+        cymbal_pads.iter().map(|(_, c)| *c).collect(),
+        modes,
     );
 
     let desk = Desk {
@@ -1259,6 +1395,8 @@ fn main() -> eframe::Result {
         pad_sel: 0,
         mesh_pads,
         mesh_sel: 0,
+        cymbal_pads,
+        cymbal_sel: 0,
         rolling: [false; NPADS],
         drum_down: [false; NPADS],
         last_mouth_pos: None,
@@ -1271,7 +1409,7 @@ fn main() -> eframe::Result {
     eframe::run_native(
         "timber desk",
         eframe::NativeOptions {
-            viewport: egui::ViewportBuilder::default().with_inner_size([1020.0, 700.0]),
+            viewport: egui::ViewportBuilder::default().with_inner_size([1020.0, 760.0]),
             ..Default::default()
         },
         Box::new(|_cc| Ok(Box::new(desk))),

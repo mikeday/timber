@@ -7,12 +7,16 @@
 
 pub mod analyze;
 pub mod body;
+pub mod cymbal;
 pub mod drums;
+pub mod grid;
 pub mod mesh;
 pub mod modal;
 pub mod mouth;
+pub mod plate;
 pub mod sing;
 pub mod speak;
+pub mod stick;
 pub mod stream;
 pub mod string;
 pub mod tract;

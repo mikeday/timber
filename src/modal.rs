@@ -287,3 +287,503 @@ pub fn render(h: &Hit, rng: &mut Rng) -> Vec<f32> {
     fade_out(&mut out);
     out
 }
+
+/// A synth cymbal: not a plate, a *picture* of one. Plate partials
+/// space out roughly linearly (mode count grows ∝ frequency) with no
+/// harmonic relation; the lowest partials are quiet (a cymbal's
+/// weight sits at 2–6 kHz — loud lows made it a gong) and decays
+/// shorten only gently upward.
+/// Generated once with a seeded jitter — the point is the density
+/// and the irregularity, not any particular number. The "record"
+/// cymbal to the modal plate's "instrument", as the modal kick is
+/// to the mesh kick; the crash's wash is the pad's noise burst plus
+/// its bloom (drums.rs).
+pub const CYMBAL: &[Mode] = &[
+    Mode {
+        ratio: 0.98,
+        gain: 0.17,
+        decay: 1.40,
+    },
+    Mode {
+        ratio: 1.37,
+        gain: 0.19,
+        decay: 1.35,
+    },
+    Mode {
+        ratio: 1.76,
+        gain: 0.27,
+        decay: 1.30,
+    },
+    Mode {
+        ratio: 2.08,
+        gain: 0.33,
+        decay: 1.25,
+    },
+    Mode {
+        ratio: 2.49,
+        gain: 0.36,
+        decay: 1.21,
+    },
+    Mode {
+        ratio: 2.92,
+        gain: 0.33,
+        decay: 1.17,
+    },
+    Mode {
+        ratio: 3.49,
+        gain: 0.53,
+        decay: 1.13,
+    },
+    Mode {
+        ratio: 3.83,
+        gain: 0.43,
+        decay: 1.09,
+    },
+    Mode {
+        ratio: 4.50,
+        gain: 0.66,
+        decay: 1.06,
+    },
+    Mode {
+        ratio: 4.96,
+        gain: 0.56,
+        decay: 1.03,
+    },
+    Mode {
+        ratio: 5.66,
+        gain: 0.49,
+        decay: 1.00,
+    },
+    Mode {
+        ratio: 6.10,
+        gain: 0.60,
+        decay: 0.97,
+    },
+    Mode {
+        ratio: 6.16,
+        gain: 0.58,
+        decay: 0.95,
+    },
+    Mode {
+        ratio: 6.75,
+        gain: 0.88,
+        decay: 0.92,
+    },
+    Mode {
+        ratio: 7.14,
+        gain: 0.83,
+        decay: 0.90,
+    },
+    Mode {
+        ratio: 7.99,
+        gain: 0.75,
+        decay: 0.87,
+    },
+    Mode {
+        ratio: 8.43,
+        gain: 0.63,
+        decay: 0.85,
+    },
+    Mode {
+        ratio: 8.51,
+        gain: 0.68,
+        decay: 0.83,
+    },
+    Mode {
+        ratio: 9.58,
+        gain: 0.77,
+        decay: 0.81,
+    },
+    Mode {
+        ratio: 9.74,
+        gain: 0.83,
+        decay: 0.80,
+    },
+    Mode {
+        ratio: 10.40,
+        gain: 0.72,
+        decay: 0.78,
+    },
+    Mode {
+        ratio: 11.29,
+        gain: 0.88,
+        decay: 0.76,
+    },
+    Mode {
+        ratio: 11.19,
+        gain: 0.83,
+        decay: 0.74,
+    },
+    Mode {
+        ratio: 12.04,
+        gain: 0.95,
+        decay: 0.73,
+    },
+    Mode {
+        ratio: 12.83,
+        gain: 0.72,
+        decay: 0.71,
+    },
+    Mode {
+        ratio: 13.70,
+        gain: 0.65,
+        decay: 0.70,
+    },
+    Mode {
+        ratio: 13.49,
+        gain: 0.90,
+        decay: 0.69,
+    },
+    Mode {
+        ratio: 13.65,
+        gain: 0.80,
+        decay: 0.67,
+    },
+    Mode {
+        ratio: 14.00,
+        gain: 0.87,
+        decay: 0.66,
+    },
+    Mode {
+        ratio: 15.62,
+        gain: 0.83,
+        decay: 0.65,
+    },
+    Mode {
+        ratio: 16.35,
+        gain: 0.73,
+        decay: 0.64,
+    },
+    Mode {
+        ratio: 16.61,
+        gain: 0.84,
+        decay: 0.62,
+    },
+    Mode {
+        ratio: 16.97,
+        gain: 0.78,
+        decay: 0.61,
+    },
+    Mode {
+        ratio: 17.98,
+        gain: 0.98,
+        decay: 0.60,
+    },
+    Mode {
+        ratio: 17.89,
+        gain: 0.87,
+        decay: 0.59,
+    },
+    Mode {
+        ratio: 17.67,
+        gain: 0.88,
+        decay: 0.58,
+    },
+    Mode {
+        ratio: 19.31,
+        gain: 1.00,
+        decay: 0.57,
+    },
+    Mode {
+        ratio: 20.21,
+        gain: 0.71,
+        decay: 0.56,
+    },
+    Mode {
+        ratio: 19.91,
+        gain: 0.87,
+        decay: 0.56,
+    },
+    Mode {
+        ratio: 19.70,
+        gain: 0.78,
+        decay: 0.55,
+    },
+    Mode {
+        ratio: 20.54,
+        gain: 0.65,
+        decay: 0.54,
+    },
+    Mode {
+        ratio: 20.84,
+        gain: 0.91,
+        decay: 0.53,
+    },
+    Mode {
+        ratio: 21.53,
+        gain: 0.70,
+        decay: 0.52,
+    },
+    Mode {
+        ratio: 22.67,
+        gain: 0.95,
+        decay: 0.51,
+    },
+    Mode {
+        ratio: 22.50,
+        gain: 0.78,
+        decay: 0.51,
+    },
+    Mode {
+        ratio: 24.17,
+        gain: 0.95,
+        decay: 0.50,
+    },
+    Mode {
+        ratio: 25.40,
+        gain: 0.95,
+        decay: 0.49,
+    },
+    Mode {
+        ratio: 24.62,
+        gain: 0.77,
+        decay: 0.49,
+    },
+];
+
+/// A synth ride: denser and lower than the crash, with a lift in the
+/// partials around 8–16× the base — the ping — and long decays. With
+/// its lows quiet and only 32 partials the first ride was a triangle
+/// with a shimmer; a ride's body is the mids.
+pub const RIDE: &[Mode] = &[
+    Mode {
+        ratio: 1.00,
+        gain: 0.49,
+        decay: 3.00,
+    },
+    Mode {
+        ratio: 1.33,
+        gain: 0.51,
+        decay: 2.86,
+    },
+    Mode {
+        ratio: 1.60,
+        gain: 0.58,
+        decay: 2.73,
+    },
+    Mode {
+        ratio: 1.88,
+        gain: 0.60,
+        decay: 2.61,
+    },
+    Mode {
+        ratio: 2.32,
+        gain: 0.73,
+        decay: 2.50,
+    },
+    Mode {
+        ratio: 2.54,
+        gain: 0.61,
+        decay: 2.40,
+    },
+    Mode {
+        ratio: 2.89,
+        gain: 0.83,
+        decay: 2.31,
+    },
+    Mode {
+        ratio: 3.45,
+        gain: 0.59,
+        decay: 2.22,
+    },
+    Mode {
+        ratio: 3.94,
+        gain: 1.28,
+        decay: 2.14,
+    },
+    Mode {
+        ratio: 4.20,
+        gain: 1.10,
+        decay: 2.07,
+    },
+    Mode {
+        ratio: 4.37,
+        gain: 0.79,
+        decay: 2.00,
+    },
+    Mode {
+        ratio: 4.93,
+        gain: 0.81,
+        decay: 1.94,
+    },
+    Mode {
+        ratio: 5.14,
+        gain: 0.91,
+        decay: 1.88,
+    },
+    Mode {
+        ratio: 5.44,
+        gain: 1.02,
+        decay: 1.82,
+    },
+    Mode {
+        ratio: 6.07,
+        gain: 1.22,
+        decay: 1.76,
+    },
+    Mode {
+        ratio: 6.52,
+        gain: 1.11,
+        decay: 1.71,
+    },
+    Mode {
+        ratio: 6.91,
+        gain: 1.12,
+        decay: 1.67,
+    },
+    Mode {
+        ratio: 7.29,
+        gain: 0.71,
+        decay: 1.62,
+    },
+    Mode {
+        ratio: 8.11,
+        gain: 1.00,
+        decay: 1.58,
+    },
+    Mode {
+        ratio: 8.42,
+        gain: 0.88,
+        decay: 1.54,
+    },
+    Mode {
+        ratio: 8.40,
+        gain: 0.69,
+        decay: 1.50,
+    },
+    Mode {
+        ratio: 8.78,
+        gain: 0.63,
+        decay: 1.46,
+    },
+    Mode {
+        ratio: 9.64,
+        gain: 0.76,
+        decay: 1.43,
+    },
+    Mode {
+        ratio: 10.15,
+        gain: 0.75,
+        decay: 1.40,
+    },
+    Mode {
+        ratio: 10.70,
+        gain: 0.94,
+        decay: 1.36,
+    },
+    Mode {
+        ratio: 10.13,
+        gain: 0.68,
+        decay: 1.33,
+    },
+    Mode {
+        ratio: 11.54,
+        gain: 0.79,
+        decay: 1.30,
+    },
+    Mode {
+        ratio: 12.06,
+        gain: 0.76,
+        decay: 1.28,
+    },
+    Mode {
+        ratio: 11.43,
+        gain: 0.85,
+        decay: 1.25,
+    },
+    Mode {
+        ratio: 12.72,
+        gain: 0.71,
+        decay: 1.22,
+    },
+    Mode {
+        ratio: 12.27,
+        gain: 0.73,
+        decay: 1.20,
+    },
+    Mode {
+        ratio: 13.85,
+        gain: 0.90,
+        decay: 1.18,
+    },
+    Mode {
+        ratio: 13.15,
+        gain: 0.70,
+        decay: 1.15,
+    },
+    Mode {
+        ratio: 13.54,
+        gain: 0.62,
+        decay: 1.13,
+    },
+    Mode {
+        ratio: 14.98,
+        gain: 0.67,
+        decay: 1.11,
+    },
+    Mode {
+        ratio: 15.07,
+        gain: 0.78,
+        decay: 1.09,
+    },
+    Mode {
+        ratio: 14.95,
+        gain: 0.89,
+        decay: 1.07,
+    },
+    Mode {
+        ratio: 15.28,
+        gain: 0.86,
+        decay: 1.05,
+    },
+    Mode {
+        ratio: 15.68,
+        gain: 0.77,
+        decay: 1.03,
+    },
+    Mode {
+        ratio: 16.27,
+        gain: 0.71,
+        decay: 1.02,
+    },
+    Mode {
+        ratio: 18.01,
+        gain: 0.92,
+        decay: 1.00,
+    },
+    Mode {
+        ratio: 17.30,
+        gain: 0.95,
+        decay: 0.98,
+    },
+    Mode {
+        ratio: 17.57,
+        gain: 0.76,
+        decay: 0.97,
+    },
+    Mode {
+        ratio: 19.19,
+        gain: 0.86,
+        decay: 0.95,
+    },
+    Mode {
+        ratio: 18.23,
+        gain: 1.00,
+        decay: 0.94,
+    },
+    Mode {
+        ratio: 18.88,
+        gain: 0.70,
+        decay: 0.92,
+    },
+    Mode {
+        ratio: 20.43,
+        gain: 0.73,
+        decay: 0.91,
+    },
+    Mode {
+        ratio: 19.93,
+        gain: 0.63,
+        decay: 0.90,
+    },
+];

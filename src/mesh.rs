@@ -32,6 +32,8 @@
 //! The mesh steps at half the sample rate (interpolated between steps):
 //! the bandwidth a drum head needs for a quarter of the cost.
 
+use crate::grid::Disc;
+use crate::stick::{self, Stick};
 use crate::util::{Rng, SR};
 
 /// Disc radius in cells.
@@ -68,17 +70,6 @@ const TENSION_MAX: f32 = 1.0;
 /// permanent hum at the tension cap. The smoothing mops up what
 /// dispersion and damping leave of the ripple.
 const ENERGY_SMOOTH: f32 = 0.01;
-/// Stick mass in units of the contact patch's mass — a good fraction
-/// of the whole head, as a real stick is. It is the head's tension,
-/// not the patch, that throws the stick back, so contact time is set
-/// by this mass against the head's stiffness once the tip is hard.
-const STICK_MASS: f32 = 25.0;
-/// Contact stiffness across the hardness range (felt beater .. wood
-/// tip), in per-step² units. Measured contact: felt beater on a 55 Hz
-/// kick ~15 ms, wood tip on a 165 Hz tom ~2 ms, shortening with
-/// strength (examples/stickprobe.rs).
-const K_SOFT: f32 = 0.05;
-const K_HARD: f32 = 6.0;
 /// Stick velocity per unit strength, in fundamental radians per step
 /// (the same normalization as the pickup, so levels sit with the old
 /// velocity-bump strike).
@@ -206,31 +197,15 @@ pub struct Mesh {
     patch: Vec<(usize, f32)>,
     /// Sum of the raw bump — the patch's mass in cell masses.
     patch_mass: f32,
-    /// The stick: position and velocity in head-displacement units,
-    /// live from the strike until the head throws it off.
-    stick_z: f32,
-    stick_v: f32,
-    stick_on: bool,
-    /// Internal steps the last stick spent in contact (diagnostic).
-    contact_steps: u32,
+    stick: Stick,
     /// Samples of near-silence so far; a silent head stops stepping.
     quiet: u32,
 }
 
 impl Mesh {
     pub fn new(p: MeshParams) -> Self {
-        let mut mask = vec![false; W * W];
-        let mut cells = Vec::new();
-        let c = (R + 1) as f32;
-        for j in 1..W - 1 {
-            for i in 1..W - 1 {
-                let (dx, dy) = (i as f32 - c, j as f32 - c);
-                if dx * dx + dy * dy <= (R as f32 + 0.5) * (R as f32 + 0.5) {
-                    mask[j * W + i] = true;
-                    cells.push(j * W + i);
-                }
-            }
-        }
+        let Disc { w, mask, cells, .. } = Disc::new(R, 1, 0.0);
+        debug_assert_eq!(w, W);
         let mut m = Mesh {
             p,
             u: vec![0.0; W * W],
@@ -256,10 +231,7 @@ impl Mesh {
             click_lp: 0.0,
             patch: Vec::new(),
             patch_mass: 1.0,
-            stick_z: 0.0,
-            stick_v: 0.0,
-            stick_on: false,
-            contact_steps: 0,
+            stick: Stick::default(),
             quiet: u32::MAX / 2,
         };
         m.set_params(p);
@@ -330,34 +302,14 @@ impl Mesh {
     fn build_patch(&mut self) {
         let c = (R + 1) as f32;
         let cx = c + self.p.strike_pos.clamp(0.0, 1.0) * (R as f32 - 2.5);
-        let rad = self.p.mallet.clamp(0.8, 5.0);
-        self.patch.clear();
-        let mut mass = 0.0f32;
-        for j in 1..W - 1 {
-            for i in 1..W - 1 {
-                let idx = j * W + i;
-                let (dx, dy) = (i as f32 - cx, j as f32 - c);
-                let d = (dx * dx + dy * dy).sqrt();
-                if self.mask[idx] && d < rad {
-                    let bump = 0.5 * (1.0 + (std::f32::consts::PI * d / rad).cos());
-                    self.patch.push((idx, bump));
-                    mass += bump;
-                }
-            }
-        }
-        for (_, w) in &mut self.patch {
-            *w /= mass;
-        }
+        let (patch, mass) = stick::patch(&self.mask, W, (cx, c), self.p.mallet.clamp(0.8, 5.0));
+        self.patch = patch;
         self.patch_mass = mass;
-    }
-
-    fn contact_k(&self) -> f32 {
-        K_SOFT * (K_HARD / K_SOFT).powf(self.p.hardness.clamp(0.0, 1.0))
     }
 
     /// How long the last stick stayed on the head, in internal steps.
     pub fn contact_steps(&self) -> u32 {
-        self.contact_steps
+        self.stick.contact_steps()
     }
 
     /// Head displacement under the stick.
@@ -376,10 +328,8 @@ impl Mesh {
     /// kick swings a low head enormously (displacement ~ v/ω), which
     /// floods the tension feedback.
     pub fn strike(&mut self, strength: f32) {
-        self.stick_z = self.under_stick();
-        self.stick_v = strength * self.omega_k() * STICK_V;
-        self.stick_on = true;
-        self.contact_steps = 0;
+        self.stick
+            .throw(self.under_stick(), strength * self.omega_k() * STICK_V);
         self.click_env = self.p.click * strength;
         self.quiet = 0;
     }
@@ -393,21 +343,9 @@ impl Mesh {
         let stretch = (self.p.tension * ENERGY_GAIN * self.energy).min(TENSION_MAX);
         let lam2 = (self.lam2 * (1.0 + stretch)).min(LAM2_MAX);
         let (s0, s1) = (self.s0, self.s1);
-        // Stick contact: Hertz law, force ∝ compression^1.5. The head
-        // takes the force over the patch, the stick takes the
-        // reaction; when the head has pushed it back off, it is gone.
-        let mut force = 0.0f32;
-        if self.stick_on {
-            let c = self.stick_z - self.under_stick();
-            if c > 0.0 {
-                force = self.contact_k() * c * c.sqrt();
-                self.contact_steps += 1;
-            } else if self.stick_v < 0.0 {
-                self.stick_on = false;
-            }
-            self.stick_v -= force / (STICK_MASS * self.patch_mass);
-            self.stick_z += self.stick_v;
-        }
+        let force = self
+            .stick
+            .step(self.under_stick(), self.p.hardness, self.patch_mass);
         // Air spring: cavity pressure from the batter's mean inward
         // displacement plus the resonant head's, pushing both back.
         let air = if self.p.air > 0.0 {
@@ -460,7 +398,7 @@ impl Mesh {
         // rest value leaves a ripple proportional to the stretch — and
         // the pump came back on hard hits.
         let e = (strain + 0.25 * kinetic / lam2) / (K1 * self.cells.len() as f32);
-        if self.stick_on {
+        if self.stick.on() {
             // The stick is the onset: no lag while it is pushing, so the
             // pitch peaks with the hit and droops from there.
             self.energy_raw = e;
