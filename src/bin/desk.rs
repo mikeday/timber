@@ -14,7 +14,8 @@
 //! tongue surface, a live tube-profile drawing, and a phoneme box that
 //! speaks through timber::speak.
 //!
-//! Keys: Z X C V B N M , . = drums (shift = roll) · A S D F G H J K =
+//! Keys: Z X C V B N M , . = drums (shift = roll) · 1 2 3 4 5 = mesh drums
+//! (shift = hard hit) · A S D F G H J K =
 //! pluck strings (finger while bowing; melody while a voice engine is
 //! held or speaking) · Q W E R T = vowels (steer the held engine).
 //! Bow surface: hold, x-offset from center = speed, height = pressure.
@@ -28,7 +29,7 @@ use eframe::egui;
 
 use timber::util::{AtomicF32, Rng, SR};
 use timber::voice::{self, Note, Vowel};
-use timber::{body, drums, modal, mouth, sing, speak, stream, tract};
+use timber::{body, drums, mesh, modal, mouth, sing, speak, stream, tract};
 
 // ---- Lock-free mixer state shared with the audio thread -----------------
 
@@ -71,6 +72,10 @@ enum Msg {
     Roll(usize, bool),
     /// Speak a phoneme sequence through the tract.
     Speak(Vec<speak::Seg>),
+    /// Hit a finite-difference membrane pad with a stick velocity.
+    MeshStrike(usize, f32),
+    /// A mesh pad's parameters changed.
+    MeshPad(usize, mesh::MeshParams),
 }
 
 // ---- Audio thread --------------------------------------------------------
@@ -97,6 +102,7 @@ fn start_audio(
     rx: Receiver<Msg>,
     string_freqs: Vec<f32>,
     pads: Vec<drums::PadParams>,
+    mesh_pads: Vec<mesh::MeshParams>,
 ) -> cpal::Stream {
     let device = cpal::default_host()
         .default_output_device()
@@ -118,6 +124,7 @@ fn start_audio(
 
     let mut bank = stream::Bank::new(&string_freqs);
     let mut kit = drums::Kit::new(pads);
+    let mut heads = mesh::Kit::new(mesh_pads);
     let mut mouth = mouth::Mouth::new();
     let mut tube = tract::Tract::new();
     let mut utter: Option<speak::Utterance> = None;
@@ -147,6 +154,8 @@ fn start_audio(
                         Msg::Pad(i, params) => kit.set_params(i, params),
                         Msg::Roll(i, on) => kit.set_roll(i, on),
                         Msg::Speak(segs) => utter = speak::Utterance::new(segs),
+                        Msg::MeshStrike(i, strength) => heads.strike(i, strength),
+                        Msg::MeshPad(i, params) => heads.set_params(i, params),
                         Msg::Knock(i) => {
                             let sel = mixer.strips[i].body.load(Relaxed).min(bodies[i].len() - 1);
                             if sel > 0 {
@@ -205,7 +214,7 @@ fn start_audio(
                         true
                     });
                     sums[STRING] += bank.tick(&p);
-                    sums[DRUMS] += kit.tick(&mut rng);
+                    sums[DRUMS] += kit.tick(&mut rng) + heads.tick(&mut rng);
                     sums[VOICE] += mouth.tick(&mp, &mut rng);
                     // A running utterance overrides the pad's
                     // articulation; pitch/level stay live. Release
@@ -453,6 +462,16 @@ const DRUM_KEYS: [egui::Key; 9] = [
     egui::Key::Period,
 ];
 const NPADS: usize = DRUM_KEYS.len();
+/// Mesh pads: number row. Shift = a hard hit (the tension glide and
+/// the snare's full rattle only show up when the stick really lands).
+const MESH_KEYS: [egui::Key; 5] = [
+    egui::Key::Num1,
+    egui::Key::Num2,
+    egui::Key::Num3,
+    egui::Key::Num4,
+    egui::Key::Num5,
+];
+const NMESH: usize = MESH_KEYS.len();
 const NOTE_KEYS: [egui::Key; 8] = [
     egui::Key::A,
     egui::Key::S,
@@ -499,6 +518,8 @@ struct Desk {
 
     pads: Vec<DrumParams>,
     pad_sel: usize,
+    mesh_pads: Vec<(&'static str, mesh::MeshParams)>,
+    mesh_sel: usize,
     rolling: [bool; NPADS],
     drum_down: [bool; NPADS],
     last_mouth_pos: Option<egui::Pos2>,
@@ -513,6 +534,12 @@ impl Desk {
     fn strike(&mut self, pad: usize) {
         self.pad_sel = pad;
         let _ = self.tx.send(Msg::Strike(pad));
+    }
+
+    fn strike_mesh(&mut self, pad: usize, hard: bool) {
+        self.mesh_sel = pad;
+        let strength = if hard { 1.6 } else { 0.8 };
+        let _ = self.tx.send(Msg::MeshStrike(pad, strength));
     }
 
     fn pluck(&mut self, string: usize) {
@@ -616,7 +643,9 @@ impl eframe::App for Desk {
                         acts.push((0, k));
                     }
                 } else if *pressed && !*repeat {
-                    if let Some(k) = NOTE_KEYS.iter().position(|d| *d == key) {
+                    if let Some(k) = MESH_KEYS.iter().position(|d| *d == key) {
+                        acts.push((if i.modifiers.shift { 4 } else { 3 }, k));
+                    } else if let Some(k) = NOTE_KEYS.iter().position(|d| *d == key) {
                         acts.push((1, k));
                     } else if let Some(k) = VOWEL_KEYS.iter().position(|d| *d == key) {
                         acts.push((2, k));
@@ -636,6 +665,8 @@ impl eframe::App for Desk {
         for (kind, k) in acts {
             match kind {
                 0 => self.strike(k),
+                3 => self.strike_mesh(k, false),
+                4 => self.strike_mesh(k, true),
                 // Left hand fingers, right hand excites: while the bow
                 // is on the string, a key only changes the fingered
                 // note under the sustained stroke — no pluck. With the
@@ -739,6 +770,7 @@ impl eframe::App for Desk {
             }
             ui.separator();
             ui.small("Z X C V B N M , . — drums (shift = roll)");
+            ui.small("1 2 3 4 5 — mesh drums (shift = hard hit)");
             ui.small("A S D F G H J K — pluck (finger, while bowing)");
             ui.small("Q W E R T — vowels");
             ui.small("hold bow surface — bow");
@@ -808,6 +840,42 @@ impl eframe::App for Desk {
                 // land on sounds already in the air.
                 if edited {
                     let _ = self.tx.send(Msg::Pad(self.pad_sel, p.to_pad()));
+                }
+
+                // ---- Mesh drums: the membrane as a membrane.
+                ui.separator();
+                ui.heading("drums · mesh");
+                let mut hits = Vec::new();
+                ui.horizontal_wrapped(|ui| {
+                    for (i, (name, _)) in self.mesh_pads.iter().enumerate() {
+                        let r = ui.selectable_label(self.mesh_sel == i, *name);
+                        if r.clicked() {
+                            hits.push((i, ui.input(|inp| inp.modifiers.shift)));
+                        }
+                    }
+                });
+                for (i, hard) in hits {
+                    self.strike_mesh(i, hard);
+                }
+                let (name, m) = &mut self.mesh_pads[self.mesh_sel];
+                let mut edited = false;
+                ui.label(format!("editing: {name}"));
+                edited |= slider(ui, &mut m.freq, 30.0..=400.0, true, "freq");
+                edited |= slider(ui, &mut m.decay, 0.05..=3.0, true, "decay");
+                edited |= slider(ui, &mut m.hf_damp, 0.0..=0.95, false, "overtone damp");
+                edited |= slider(ui, &mut m.tension, 0.0..=80.0, false, "tension");
+                edited |= slider(ui, &mut m.strike_pos, 0.0..=1.0, false, "strike pos");
+                edited |= slider(ui, &mut m.rattle, 0.0..=1.0, false, "rattle");
+                edited |= slider(ui, &mut m.click, 0.0..=1.0, false, "beater click");
+                edited |= slider(ui, &mut m.drive, 0.0..=6.0, false, "drive");
+                edited |= slider(ui, &mut m.air, 0.0..=1.5, false, "shell air");
+                edited |= slider(ui, &mut m.reso_freq, 25.0..=300.0, true, "reso head");
+                edited |= slider(ui, &mut m.reso_decay, 0.05..=3.0, true, "reso decay");
+                edited |= slider(ui, &mut m.hardness, 0.0..=1.0, false, "stick hardness");
+                edited |= slider(ui, &mut m.mallet, 0.8..=5.0, false, "mallet size");
+                edited |= slider(ui, &mut m.level, 0.0..=4.0, false, "level");
+                if edited {
+                    let _ = self.tx.send(Msg::MeshPad(self.mesh_sel, *m));
                 }
 
                 // ---- Strings.
@@ -1158,6 +1226,12 @@ fn main() -> eframe::Result {
     let freqs = NOTES.iter().map(|(_, f)| *f).collect();
     let pads = default_pads();
     assert_eq!(pads.len(), NPADS, "DRUM_KEYS and default_pads out of step");
+    let mesh_pads = mesh::default_kit();
+    assert_eq!(
+        mesh_pads.len(),
+        NMESH,
+        "MESH_KEYS and mesh::default_kit out of step"
+    );
     let stream = start_audio(
         mixer.clone(),
         ctl.clone(),
@@ -1167,6 +1241,7 @@ fn main() -> eframe::Result {
         rx,
         freqs,
         pads.iter().map(|p| p.to_pad()).collect(),
+        mesh_pads.iter().map(|(_, m)| *m).collect(),
     );
 
     let desk = Desk {
@@ -1182,6 +1257,8 @@ fn main() -> eframe::Result {
         rng: Rng(0x74696d62),
         pads,
         pad_sel: 0,
+        mesh_pads,
+        mesh_sel: 0,
         rolling: [false; NPADS],
         drum_down: [false; NPADS],
         last_mouth_pos: None,
@@ -1194,7 +1271,7 @@ fn main() -> eframe::Result {
     eframe::run_native(
         "timber desk",
         eframe::NativeOptions {
-            viewport: egui::ViewportBuilder::default().with_inner_size([1020.0, 520.0]),
+            viewport: egui::ViewportBuilder::default().with_inner_size([1020.0, 700.0]),
             ..Default::default()
         },
         Box::new(|_cc| Ok(Box::new(desk))),
