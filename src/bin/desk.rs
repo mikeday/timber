@@ -15,7 +15,7 @@
 //! speaks through timber::speak.
 //!
 //! Keys: Z X C V B N M , . 8 9 0 = drums (shift = roll) · 1 2 3 4 5 = mesh drums
-//! · 6 7 = cymbals (shift = hard hit) · A S D F G H J K =
+//! · 6 7 = cymbals (shift = hard hit) · space = loop · A S D F G H J K =
 //! pluck strings (finger while bowing; melody while a voice engine is
 //! held or speaking) · Q W E R T = vowels (steer the held engine).
 //! Bow surface: hold, x-offset from center = speed, height = pressure.
@@ -27,6 +27,7 @@ use std::sync::{Arc, Mutex};
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use eframe::egui;
 
+use timber::looper::Looper;
 use timber::util::{AtomicF32, Rng, SR};
 use timber::voice::{self, Note, Vowel};
 use timber::{body, cymbal, drums, mesh, modal, mouth, sing, speak, stream, tract};
@@ -79,6 +80,59 @@ enum Msg {
     /// Hit a cymbal with a stick velocity; change its params.
     CymbalStrike(usize, f32),
     CymbalPad(usize, cymbal::CymbalParams),
+    /// The looper's one button, undo and clear.
+    Loop(LoopCmd),
+}
+
+#[derive(Clone, Copy)]
+enum LoopCmd {
+    Toggle,
+    Stop,
+    Undo,
+    Clear,
+}
+
+/// What the looper records: a hit on a pad, or a roll's start/stop.
+/// Knob moves are deliberately not events — they are the live layer
+/// over the loop.
+#[derive(Clone, Copy)]
+enum Hit {
+    Pad(usize),
+    Mesh(usize, f32),
+    Cymbal(usize, f32),
+    Pluck(usize),
+    Roll(usize, bool),
+}
+
+/// Looper settings and its state for display, shared with the audio
+/// thread (which owns the loop itself, on its sample clock).
+struct LoopCtl {
+    bpm: AtomicF32,
+    quantize: AtomicBool,
+    click: AtomicBool,
+    /// looper::State as usize, layers, playhead fraction, length s.
+    state: AtomicUsize,
+    layers: AtomicUsize,
+    pos: AtomicF32,
+    len: AtomicF32,
+}
+
+fn dispatch(
+    hit: Hit,
+    bank: &mut stream::Bank,
+    kit: &mut drums::Kit,
+    heads: &mut mesh::Kit,
+    cymbals: &mut cymbal::Kit,
+    pluck_pos: f32,
+    rng: &mut Rng,
+) {
+    match hit {
+        Hit::Pad(i) => kit.strike(i),
+        Hit::Mesh(i, s) => heads.strike(i, s),
+        Hit::Cymbal(i, s) => cymbals.strike(i, s),
+        Hit::Pluck(i) => bank.pluck(i, pluck_pos, rng),
+        Hit::Roll(i, on) => kit.set_roll(i, on),
+    }
 }
 
 // ---- Audio thread --------------------------------------------------------
@@ -108,6 +162,7 @@ fn start_audio(
     mesh_pads: Vec<mesh::MeshParams>,
     cymbal_pads: Vec<cymbal::CymbalParams>,
     modes: Arc<cymbal::Modes>,
+    loop_ctl: Arc<LoopCtl>,
 ) -> cpal::Stream {
     let device = cpal::default_host()
         .default_output_device()
@@ -146,6 +201,13 @@ fn start_audio(
         .collect();
     let mut rng = Rng(0x626f7765);
     let mut voices: Vec<PlayVoice> = Vec::new();
+    // The looper lives here, on the output frame clock, so its
+    // timing is sample-exact whatever the UI thread's jitter.
+    let mut looper: Looper<Hit> = Looper::new();
+    let mut clock: u64 = 0;
+    let mut due: Vec<Hit> = Vec::new();
+    // Metronome: a short sine ping, higher on beat one.
+    let (mut click_env, mut click_ph, mut click_f) = (0.0f32, 0.0f32, 1400.0f32);
     let stream = device
         .build_output_stream(
             &config,
@@ -153,16 +215,45 @@ fn start_audio(
                 let p = stream::Params::read(&ctl);
                 let mp = mouth::Params::read(&mouth_ctl);
                 let tp = tract::Params::read(&tract_ctl);
+                looper.bpm = loop_ctl.bpm.get();
+                looper.quantize = loop_ctl.quantize.load(Relaxed);
                 while let Ok(msg) = rx.try_recv() {
+                    // Hits go through the looper (which records them if
+                    // it is listening) and then to the instruments.
+                    let hit = match msg {
+                        Msg::Pluck(i) => Some(Hit::Pluck(i)),
+                        Msg::Strike(i) => Some(Hit::Pad(i)),
+                        Msg::Roll(i, on) => Some(Hit::Roll(i, on)),
+                        Msg::MeshStrike(i, s) => Some(Hit::Mesh(i, s)),
+                        Msg::CymbalStrike(i, s) => Some(Hit::Cymbal(i, s)),
+                        _ => None,
+                    };
+                    if let Some(h) = hit {
+                        looper.record(clock, h);
+                        dispatch(
+                            h,
+                            &mut bank,
+                            &mut kit,
+                            &mut heads,
+                            &mut cymbals,
+                            ctl.pluck_pos.get(),
+                            &mut rng,
+                        );
+                        continue;
+                    }
                     match msg {
-                        Msg::Pluck(i) => bank.pluck(i, ctl.pluck_pos.get(), &mut rng),
-                        Msg::Strike(i) => kit.strike(i),
+                        Msg::Pluck(_)
+                        | Msg::Strike(_)
+                        | Msg::Roll(..)
+                        | Msg::MeshStrike(..)
+                        | Msg::CymbalStrike(..) => unreachable!(),
+                        Msg::Loop(LoopCmd::Toggle) => looper.toggle(clock),
+                        Msg::Loop(LoopCmd::Stop) => looper.stop(clock),
+                        Msg::Loop(LoopCmd::Undo) => looper.undo(),
+                        Msg::Loop(LoopCmd::Clear) => looper.clear(),
                         Msg::Pad(i, params) => kit.set_params(i, params),
-                        Msg::Roll(i, on) => kit.set_roll(i, on),
                         Msg::Speak(segs) => utter = speak::Utterance::new(segs),
-                        Msg::MeshStrike(i, strength) => heads.strike(i, strength),
                         Msg::MeshPad(i, params) => heads.set_params(i, params),
-                        Msg::CymbalStrike(i, strength) => cymbals.strike(i, strength),
                         Msg::CymbalPad(i, params) => cymbals.set_params(i, params),
                         Msg::Knock(i) => {
                             let sel = mixer.strips[i].body.load(Relaxed).min(bodies[i].len() - 1);
@@ -201,9 +292,42 @@ fn start_audio(
                     }
                 }
                 for frame in data.chunks_mut(channels) {
+                    // The loop replays its hits on this clock.
+                    due.clear();
+                    looper.due(clock, &mut due);
+                    for h in due.drain(..) {
+                        dispatch(
+                            h,
+                            &mut bank,
+                            &mut kit,
+                            &mut heads,
+                            &mut cymbals,
+                            ctl.pluck_pos.get(),
+                            &mut rng,
+                        );
+                    }
+                    if loop_ctl.click.load(Relaxed)
+                        && let Some(one) = looper.beat(clock)
+                    {
+                        click_env = 1.0;
+                        click_ph = 0.0;
+                        click_f = if one { 2000.0 } else { 1400.0 };
+                    }
+                    if clock % 256 == 0 {
+                        loop_ctl.state.store(looper.state() as usize, Relaxed);
+                        loop_ctl.layers.store(looper.layers(), Relaxed);
+                        loop_ctl.pos.set(looper.position(clock));
+                        loop_ctl.len.set(looper.len_secs());
+                    }
+                    clock += 1;
                     // Sum each strip dry first: the body must see the
                     // strip's whole signal once, not each voice.
                     let mut sums = [0.0f32; 3];
+                    if click_env > 1e-4 {
+                        sums[DRUMS] += click_ph.sin() * click_env * 0.25;
+                        click_ph += std::f32::consts::TAU * click_f / SR;
+                        click_env *= (-1.0 / (0.006 * SR)).exp();
+                    }
                     voices.retain_mut(|v| {
                         let i = v.pos as usize;
                         if i + 1 >= v.buf.len() {
@@ -608,6 +732,7 @@ struct Desk {
     mesh_sel: usize,
     cymbal_pads: Vec<(&'static str, cymbal::CymbalParams)>,
     cymbal_sel: usize,
+    loop_ctl: Arc<LoopCtl>,
     rolling: [bool; NPADS],
     drum_down: [bool; NPADS],
     last_mouth_pos: Option<egui::Pos2>,
@@ -731,7 +856,11 @@ impl eframe::App for Desk {
                     continue;
                 };
                 let key = physical_key.unwrap_or(*key);
-                if let Some(k) = DRUM_KEYS.iter().position(|d| *d == key) {
+                if *pressed && !*repeat && key == egui::Key::Space {
+                    acts.push((if i.modifiers.shift { 10 } else { 7 }, 0));
+                } else if *pressed && !*repeat && key == egui::Key::Backspace {
+                    acts.push((if i.modifiers.shift { 9 } else { 8 }, 0));
+                } else if let Some(k) = DRUM_KEYS.iter().position(|d| *d == key) {
                     self.drum_down[k] = *pressed;
                     if *pressed && !*repeat {
                         acts.push((0, k));
@@ -765,6 +894,18 @@ impl eframe::App for Desk {
                 4 => self.strike_mesh(k, true),
                 5 => self.strike_cymbal(k, false),
                 6 => self.strike_cymbal(k, true),
+                7 => {
+                    let _ = self.tx.send(Msg::Loop(LoopCmd::Toggle));
+                }
+                8 => {
+                    let _ = self.tx.send(Msg::Loop(LoopCmd::Undo));
+                }
+                9 => {
+                    let _ = self.tx.send(Msg::Loop(LoopCmd::Clear));
+                }
+                10 => {
+                    let _ = self.tx.send(Msg::Loop(LoopCmd::Stop));
+                }
                 // Left hand fingers, right hand excites: while the bow
                 // is on the string, a key only changes the fingered
                 // note under the sustained stroke — no pluck. With the
@@ -867,6 +1008,76 @@ impl eframe::App for Desk {
                 });
             }
             ui.separator();
+            ui.label("loop");
+            let state = match self.loop_ctl.state.load(Relaxed) {
+                1 => "recording",
+                2 => "playing",
+                3 => "overdub",
+                4 => "stopped",
+                _ => "idle",
+            };
+            let layers = self.loop_ctl.layers.load(Relaxed);
+            let len = self.loop_ctl.len.get();
+            ui.horizontal(|ui| {
+                let label = match state {
+                    "idle" => "record",
+                    "recording" => "close & play",
+                    "playing" => "overdub",
+                    "overdub" => "jam",
+                    _ => "play",
+                };
+                if ui.button(label).clicked() {
+                    let _ = self.tx.send(Msg::Loop(LoopCmd::Toggle));
+                }
+                if matches!(state, "playing" | "overdub") && ui.small_button("stop").clicked() {
+                    let _ = self.tx.send(Msg::Loop(LoopCmd::Stop));
+                }
+                if ui.small_button("undo").clicked() {
+                    let _ = self.tx.send(Msg::Loop(LoopCmd::Undo));
+                }
+                if ui.small_button("clear").clicked() {
+                    let _ = self.tx.send(Msg::Loop(LoopCmd::Clear));
+                }
+            });
+            let text = if state == "recording" {
+                format!("recording… {:.1}s", self.loop_ctl.pos.get())
+            } else if len > 0.0 {
+                format!(
+                    "{state} · {layers} layer{} · {len:.1}s",
+                    if layers == 1 { "" } else { "s" }
+                )
+            } else {
+                "idle — space to record".into()
+            };
+            let cycling = matches!(state, "playing" | "overdub");
+            let bar = egui::ProgressBar::new(if cycling {
+                self.loop_ctl.pos.get()
+            } else {
+                0.0
+            })
+            .text(text);
+            // Red while overdubbing: the pedal's light.
+            let bar = if state == "overdub" {
+                bar.fill(egui::Color32::from_rgb(180, 60, 60))
+            } else {
+                bar
+            };
+            ui.add(bar);
+            ui.horizontal(|ui| {
+                let mut q = self.loop_ctl.quantize.load(Relaxed);
+                if ui.checkbox(&mut q, "quantize").changed() {
+                    self.loop_ctl.quantize.store(q, Relaxed);
+                }
+                let mut c = self.loop_ctl.click.load(Relaxed);
+                if ui.checkbox(&mut c, "click").changed() {
+                    self.loop_ctl.click.store(c, Relaxed);
+                }
+            });
+            ctl_slider(ui, &self.loop_ctl.bpm, 50.0..=200.0, false, "bpm");
+            ui.separator();
+            ui.small("space — loop: record / close & play / overdub ↔ jam");
+            ui.small("shift+space — stop / restart");
+            ui.small("backspace — undo last layer (shift: clear)");
             ui.small("Z X C V B N M , . 8 9 0 — drums (shift = roll)");
             ui.small("1 2 3 4 5 — mesh drums (shift = hard hit)");
             ui.small("6 7 — cymbals (shift = hard hit)");
@@ -1391,6 +1602,15 @@ fn main() -> eframe::Result {
         modes.coupling_entries(),
         t0.elapsed().as_secs_f32()
     );
+    let loop_ctl = Arc::new(LoopCtl {
+        bpm: AtomicF32::new(100.0),
+        quantize: AtomicBool::new(false),
+        click: AtomicBool::new(false),
+        state: AtomicUsize::new(0),
+        layers: AtomicUsize::new(0),
+        pos: AtomicF32::new(0.0),
+        len: AtomicF32::new(0.0),
+    });
     let cymbal_pads = cymbal::default_kit();
     assert_eq!(
         cymbal_pads.len(),
@@ -1409,6 +1629,7 @@ fn main() -> eframe::Result {
         mesh_pads.iter().map(|(_, m)| *m).collect(),
         cymbal_pads.iter().map(|(_, c)| *c).collect(),
         modes,
+        loop_ctl.clone(),
     );
 
     let desk = Desk {
@@ -1428,6 +1649,7 @@ fn main() -> eframe::Result {
         mesh_sel: 0,
         cymbal_pads,
         cymbal_sel: 0,
+        loop_ctl,
         rolling: [false; NPADS],
         drum_down: [false; NPADS],
         last_mouth_pos: None,

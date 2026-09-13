@@ -10,6 +10,7 @@ pub mod body;
 pub mod cymbal;
 pub mod drums;
 pub mod grid;
+pub mod looper;
 pub mod mesh;
 pub mod modal;
 pub mod mouth;
