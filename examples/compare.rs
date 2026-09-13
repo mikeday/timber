@@ -30,6 +30,8 @@ fn pairs() -> Vec<Pair> {
         noise_decay: 0.1,
         noise_tone: 0.0,
         bloom: 0.0,
+        bloom_delay: 0.025,
+        bloom_spread: 0.0,
         drive: 0.0,
         shimmer: 0.0,
         level: 1.0,
@@ -57,6 +59,8 @@ fn pairs() -> Vec<Pair> {
                 noise_decay: 0.004,
                 noise_tone: 0.0,
                 bloom: 0.0,
+                bloom_delay: 0.025,
+                bloom_spread: 0.0,
                 drive: 1.8,
                 ..modal
             },

@@ -14,7 +14,7 @@
 //! tongue surface, a live tube-profile drawing, and a phoneme box that
 //! speaks through timber::speak.
 //!
-//! Keys: Z X C V B N M , . 8 9 = drums (shift = roll) · 1 2 3 4 5 = mesh drums
+//! Keys: Z X C V B N M , . 8 9 0 = drums (shift = roll) · 1 2 3 4 5 = mesh drums
 //! · 6 7 = cymbals (shift = hard hit) · A S D F G H J K =
 //! pluck strings (finger while bowing; melody while a voice engine is
 //! held or speaking) · Q W E R T = vowels (steer the held engine).
@@ -291,6 +291,7 @@ enum ModeSet {
     Triangle,
     Cymbal,
     Ride,
+    Gong,
     NoiseOnly,
 }
 
@@ -303,6 +304,7 @@ impl ModeSet {
             ModeSet::Triangle => modal::TRIANGLE,
             ModeSet::Cymbal => modal::CYMBAL,
             ModeSet::Ride => modal::RIDE,
+            ModeSet::Gong => modal::GONG,
             ModeSet::NoiseOnly => &[],
         }
     }
@@ -314,6 +316,7 @@ impl ModeSet {
             ModeSet::Triangle => "triangle (rod)",
             ModeSet::Cymbal => "cymbal (synth)",
             ModeSet::Ride => "ride (synth)",
+            ModeSet::Gong => "gong (synth)",
             ModeSet::NoiseOnly => "noise only",
         }
     }
@@ -331,6 +334,8 @@ struct DrumParams {
     noise_decay: f32,
     noise_tone: f32,
     bloom: f32,
+    bloom_delay: f32,
+    bloom_spread: f32,
     drive: f32,
     shimmer: f32,
     level: f32,
@@ -349,6 +354,8 @@ impl DrumParams {
             noise_decay: self.noise_decay,
             noise_tone: self.noise_tone,
             bloom: self.bloom,
+            bloom_delay: self.bloom_delay,
+            bloom_spread: self.bloom_spread,
             drive: self.drive,
             shimmer: self.shimmer,
             level: self.level,
@@ -369,6 +376,8 @@ fn default_pads() -> Vec<DrumParams> {
         noise_decay: 0.1,
         noise_tone: 0.0,
         bloom: 0.0,
+        bloom_delay: 0.025,
+        bloom_spread: 0.0,
         drive: 0.0,
         shimmer: 0.0,
         level: 0.85,
@@ -488,6 +497,24 @@ fn default_pads() -> Vec<DrumParams> {
             level: 0.45,
             ..base
         },
+        // Tam-tam: low, loud lows, ten-second decays, and the swell —
+        // the bloom arriving 150 ms after the strike over 400 ms.
+        DrumParams {
+            name: "gong",
+            modes: ModeSet::Gong,
+            freq: 55.0,
+            damp: 1.0,
+            noise: 0.15,
+            noise_decay: 0.3,
+            noise_tone: 1.0,
+            bloom: 0.9,
+            bloom_delay: 0.15,
+            bloom_spread: 0.4,
+            drive: 0.4,
+            shimmer: 0.6,
+            level: 0.5,
+            ..base
+        },
     ]
 }
 
@@ -503,7 +530,7 @@ const VOWELS: [(&str, Vowel); 5] = [
 /// one (shift can change the logical key on some layouts — QWERTZ turns
 /// shift+',' into ';' — which would strand roll state). Must stay in
 /// step with default_pads(): asserted at startup.
-const DRUM_KEYS: [egui::Key; 11] = [
+const DRUM_KEYS: [egui::Key; 12] = [
     egui::Key::Z,
     egui::Key::X,
     egui::Key::C,
@@ -515,6 +542,7 @@ const DRUM_KEYS: [egui::Key; 11] = [
     egui::Key::Period,
     egui::Key::Num8,
     egui::Key::Num9,
+    egui::Key::Num0,
 ];
 const NPADS: usize = DRUM_KEYS.len();
 /// Mesh pads: number row. Shift = a hard hit (the tension glide and
@@ -839,7 +867,7 @@ impl eframe::App for Desk {
                 });
             }
             ui.separator();
-            ui.small("Z X C V B N M , . 8 9 — drums (shift = roll)");
+            ui.small("Z X C V B N M , . 8 9 0 — drums (shift = roll)");
             ui.small("1 2 3 4 5 — mesh drums (shift = hard hit)");
             ui.small("6 7 — cymbals (shift = hard hit)");
             ui.small("A S D F G H J K — pluck (finger, while bowing)");
@@ -884,6 +912,7 @@ impl eframe::App for Desk {
                                 ModeSet::Triangle,
                                 ModeSet::Cymbal,
                                 ModeSet::Ride,
+                                ModeSet::Gong,
                                 ModeSet::NoiseOnly,
                             ] {
                                 edited |= ui.selectable_value(&mut p.modes, m, m.name()).changed();
@@ -905,6 +934,8 @@ impl eframe::App for Desk {
                     edited |= slider(ui, &mut p.noise_decay, 0.002..=1.5, true, "rattle decay");
                     edited |= slider(ui, &mut p.noise_tone, 0.0..=1.0, false, "rattle tone");
                     edited |= slider(ui, &mut p.bloom, 0.0..=1.0, false, "wash bloom");
+                    edited |= slider(ui, &mut p.bloom_delay, 0.005..=1.0, true, "bloom delay");
+                    edited |= slider(ui, &mut p.bloom_spread, 0.0..=1.0, false, "bloom spread");
                     edited |= slider(ui, &mut p.drive, 0.0..=6.0, false, "drive");
                     edited |= slider(ui, &mut p.shimmer, 0.0..=1.0, false, "shimmer");
                     edited |= slider(ui, &mut p.level, 0.0..=1.0, false, "level");

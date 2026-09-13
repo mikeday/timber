@@ -787,3 +787,250 @@ pub const RIDE: &[Mode] = &[
         decay: 0.90,
     },
 ];
+
+/// A synth tam-tam: the cymbal's dense inharmonic partials pitched
+/// low, with the lows loud (a big thick plate's weight is low), and
+/// decays of many seconds. Its bloom — the swell that arrives after
+/// the strike — is the pad's bloom with a long delay and spread.
+pub const GONG: &[Mode] = &[
+    Mode {
+        ratio: 0.97,
+        gain: 0.86,
+        decay: 8.00,
+    },
+    Mode {
+        ratio: 1.48,
+        gain: 0.88,
+        decay: 7.62,
+    },
+    Mode {
+        ratio: 2.14,
+        gain: 0.72,
+        decay: 7.27,
+    },
+    Mode {
+        ratio: 2.63,
+        gain: 0.95,
+        decay: 6.96,
+    },
+    Mode {
+        ratio: 3.38,
+        gain: 0.77,
+        decay: 6.67,
+    },
+    Mode {
+        ratio: 4.39,
+        gain: 0.84,
+        decay: 6.40,
+    },
+    Mode {
+        ratio: 5.09,
+        gain: 0.84,
+        decay: 6.15,
+    },
+    Mode {
+        ratio: 5.77,
+        gain: 0.75,
+        decay: 5.93,
+    },
+    Mode {
+        ratio: 6.55,
+        gain: 0.96,
+        decay: 5.71,
+    },
+    Mode {
+        ratio: 7.27,
+        gain: 0.92,
+        decay: 5.52,
+    },
+    Mode {
+        ratio: 8.20,
+        gain: 0.72,
+        decay: 5.33,
+    },
+    Mode {
+        ratio: 9.11,
+        gain: 0.88,
+        decay: 5.16,
+    },
+    Mode {
+        ratio: 9.52,
+        gain: 0.71,
+        decay: 5.00,
+    },
+    Mode {
+        ratio: 10.94,
+        gain: 0.84,
+        decay: 4.85,
+    },
+    Mode {
+        ratio: 11.65,
+        gain: 0.96,
+        decay: 4.71,
+    },
+    Mode {
+        ratio: 12.52,
+        gain: 0.98,
+        decay: 4.57,
+    },
+    Mode {
+        ratio: 12.99,
+        gain: 0.94,
+        decay: 4.44,
+    },
+    Mode {
+        ratio: 13.92,
+        gain: 0.98,
+        decay: 4.32,
+    },
+    Mode {
+        ratio: 15.45,
+        gain: 0.73,
+        decay: 4.21,
+    },
+    Mode {
+        ratio: 15.20,
+        gain: 0.77,
+        decay: 4.10,
+    },
+    Mode {
+        ratio: 17.45,
+        gain: 0.83,
+        decay: 4.00,
+    },
+    Mode {
+        ratio: 17.80,
+        gain: 0.79,
+        decay: 3.90,
+    },
+    Mode {
+        ratio: 18.50,
+        gain: 0.82,
+        decay: 3.81,
+    },
+    Mode {
+        ratio: 19.12,
+        gain: 0.88,
+        decay: 3.72,
+    },
+    Mode {
+        ratio: 20.50,
+        gain: 0.97,
+        decay: 3.64,
+    },
+    Mode {
+        ratio: 21.65,
+        gain: 0.98,
+        decay: 3.56,
+    },
+    Mode {
+        ratio: 22.98,
+        gain: 1.00,
+        decay: 3.48,
+    },
+    Mode {
+        ratio: 23.53,
+        gain: 0.75,
+        decay: 3.40,
+    },
+    Mode {
+        ratio: 24.95,
+        gain: 0.99,
+        decay: 3.33,
+    },
+    Mode {
+        ratio: 26.04,
+        gain: 0.87,
+        decay: 3.27,
+    },
+    Mode {
+        ratio: 26.54,
+        gain: 0.46,
+        decay: 3.20,
+    },
+    Mode {
+        ratio: 27.84,
+        gain: 0.52,
+        decay: 3.14,
+    },
+    Mode {
+        ratio: 27.31,
+        gain: 0.43,
+        decay: 3.08,
+    },
+    Mode {
+        ratio: 29.90,
+        gain: 0.60,
+        decay: 3.02,
+    },
+    Mode {
+        ratio: 28.62,
+        gain: 0.56,
+        decay: 2.96,
+    },
+    Mode {
+        ratio: 30.55,
+        gain: 0.45,
+        decay: 2.91,
+    },
+    Mode {
+        ratio: 31.16,
+        gain: 0.56,
+        decay: 2.86,
+    },
+    Mode {
+        ratio: 34.02,
+        gain: 0.43,
+        decay: 2.81,
+    },
+    Mode {
+        ratio: 34.18,
+        gain: 0.43,
+        decay: 2.76,
+    },
+    Mode {
+        ratio: 35.54,
+        gain: 0.48,
+        decay: 2.71,
+    },
+    Mode {
+        ratio: 37.14,
+        gain: 0.60,
+        decay: 2.67,
+    },
+    Mode {
+        ratio: 36.80,
+        gain: 0.60,
+        decay: 2.62,
+    },
+    Mode {
+        ratio: 37.07,
+        gain: 0.43,
+        decay: 2.58,
+    },
+    Mode {
+        ratio: 39.18,
+        gain: 0.43,
+        decay: 2.54,
+    },
+    Mode {
+        ratio: 38.61,
+        gain: 0.49,
+        decay: 2.50,
+    },
+    Mode {
+        ratio: 41.28,
+        gain: 0.45,
+        decay: 2.46,
+    },
+    Mode {
+        ratio: 39.93,
+        gain: 0.58,
+        decay: 2.42,
+    },
+    Mode {
+        ratio: 42.07,
+        gain: 0.59,
+        decay: 2.39,
+    },
+];

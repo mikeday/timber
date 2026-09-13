@@ -40,11 +40,18 @@ pub struct PadParams {
     /// burst decays, the way a crash's roar darkens into its tail.
     pub noise_tone: f32,
     /// Wash bloom, 0..1: a hard hit sends a second, delayed impulse
-    /// into the upper partials (~25 ms after the stick, growing with
-    /// strength²), so the roar is made of the ring's own partials
-    /// rather than laid over it as noise — the *outcome* of a cymbal's
-    /// cascade, without simulating the cascade.
+    /// into the upper partials (growing with strength²), so the roar
+    /// is made of the ring's own partials rather than laid over it as
+    /// noise — the *outcome* of a cymbal's cascade, without simulating
+    /// the cascade.
     pub bloom: f32,
+    /// When the bloom arrives after the stick, seconds: ~25 ms is a
+    /// cymbal's crack, ~300 ms a tam-tam's swell.
+    pub bloom_delay: f32,
+    /// Over how long the bloom is delivered, seconds: 0 is one
+    /// impulse; longer spreads it as a noise burst of the same energy,
+    /// so the partials fill in gradually — the gong's bloom.
+    pub bloom_spread: f32,
     pub drive: f32,
     /// Doublet splitting, 0..1: every mode becomes a detuned pair, the
     /// triangle's corner trick generalized. The split is constant in Hz
@@ -78,6 +85,9 @@ pub struct Pad {
     /// back a few ms after the strike.
     bloom_pending: f32,
     bloom_wait: u32,
+    /// A spread bloom in progress: samples left and per-sample level.
+    bloom_left: u32,
+    bloom_amp: f32,
     impulse_hi: f32,
     glide_env: f32,
     glide_step: f32,
@@ -113,6 +123,8 @@ impl Pad {
             impulse: 0.0,
             bloom_pending: 0.0,
             bloom_wait: 0,
+            bloom_left: 0,
+            bloom_amp: 0.0,
             impulse_hi: 0.0,
             glide_env: 0.0,
             glide_step: 1.0,
@@ -150,7 +162,7 @@ impl Pad {
             self.impulse += strength / sum;
             if self.p.bloom > 0.0 {
                 self.bloom_pending += self.p.bloom * strength * strength * 2.0 / sum;
-                self.bloom_wait = (0.025 * SR) as u32;
+                self.bloom_wait = (self.p.bloom_delay.clamp(0.0, 2.0) * SR) as u32;
             }
         }
         self.glide_env = 1.0;
@@ -207,6 +219,7 @@ impl Pad {
         if self.choking
             && self.rattle < 1e-6
             && self.bloom_pending <= 0.0
+            && self.bloom_left == 0
             && self
                 .res
                 .iter()
@@ -232,14 +245,27 @@ impl Pad {
         self.impulse = 0.0;
         if self.bloom_pending > 0.0 {
             if self.bloom_wait == 0 {
-                self.impulse_hi = self.bloom_pending;
+                let spread = (self.p.bloom_spread.clamp(0.0, 2.0) * SR) as u32;
+                if spread == 0 {
+                    self.impulse_hi = self.bloom_pending;
+                } else {
+                    // Same energy as the single impulse, as noise over
+                    // the spread: random phases add in power, so the
+                    // per-sample level is the impulse over √N.
+                    self.bloom_left = spread;
+                    self.bloom_amp = self.bloom_pending / (spread as f32).sqrt();
+                }
                 self.bloom_pending = 0.0;
             } else {
                 self.bloom_wait -= 1;
             }
         }
-        let x_hi = self.impulse_hi;
+        let mut x_hi = self.impulse_hi;
         self.impulse_hi = 0.0;
+        if self.bloom_left > 0 {
+            x_hi += self.bloom_amp * rng.next();
+            self.bloom_left -= 1;
+        }
         let n = self.p.modes.len().min(MAX_MODES);
         let choking = self.choking;
         // Bloom weight rises with the mode's place in the list — the
@@ -394,6 +420,8 @@ mod tests {
             noise_decay: 0.1,
             noise_tone: 0.0,
             bloom: 0.0,
+            bloom_delay: 0.025,
+            bloom_spread: 0.0,
             drive: 0.0,
             shimmer: 0.0,
             level: 0.8,
@@ -412,6 +440,8 @@ mod tests {
             noise_decay: 0.1,
             noise_tone: 0.0,
             bloom: 0.0,
+            bloom_delay: 0.025,
+            bloom_spread: 0.0,
             drive: 0.0,
             shimmer: 0.0,
             level: 0.8,
@@ -430,6 +460,8 @@ mod tests {
             noise_decay: 0.025,
             noise_tone: 0.0,
             bloom: 0.0,
+            bloom_delay: 0.025,
+            bloom_spread: 0.0,
             drive: 0.0,
             shimmer: 0.0,
             level: 0.4,
