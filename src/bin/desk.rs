@@ -111,9 +111,11 @@ enum Msg {
     CymbalPad(usize, cymbal::CymbalParams),
     /// The looper's one button, undo and clear.
     Loop(LoopCmd),
-    /// A modal pad at a pitch (the melody keys), and its roll on/off.
+    /// A modal pad at a pitch (the melody keys), its roll on/off, and
+    /// its key coming up (the damper, if the pad has one).
     Note(usize, f32),
     NoteRoll(usize, f32, bool),
+    NoteOff(usize, f32),
     /// Hi-hat: stick on the top plate, the pedal, its params.
     HatStrike(f32),
     HatPedal(bool),
@@ -142,6 +144,7 @@ enum Hit {
     Pedal(bool),
     Note(usize, f32),
     NoteRoll(usize, f32, bool),
+    NoteOff(usize, f32),
 }
 
 /// Looper settings and its state for display, shared with the audio
@@ -178,6 +181,7 @@ impl Instruments {
             Hit::Pedal(down) => self.hat.pedal(down),
             Hit::Note(i, f) => self.kit.strike_note(i, f),
             Hit::NoteRoll(i, f, on) => self.kit.set_note_roll(i, f, on),
+            Hit::NoteOff(i, f) => self.kit.release_note(i, f),
         }
     }
 }
@@ -288,6 +292,7 @@ fn start_audio(
                         Msg::HatPedal(down) => Some(Hit::Pedal(down)),
                         Msg::Note(i, f) => Some(Hit::Note(i, f)),
                         Msg::NoteRoll(i, f, on) => Some(Hit::NoteRoll(i, f, on)),
+                        Msg::NoteOff(i, f) => Some(Hit::NoteOff(i, f)),
                         _ => None,
                     };
                     if let Some(h) = hit {
@@ -304,7 +309,8 @@ fn start_audio(
                         | Msg::HatStrike(_)
                         | Msg::HatPedal(_)
                         | Msg::Note(..)
-                        | Msg::NoteRoll(..) => unreachable!(),
+                        | Msg::NoteRoll(..)
+                        | Msg::NoteOff(..) => unreachable!(),
                         Msg::HatPad(params) => ins.hat.set_params(params),
                         Msg::Loop(LoopCmd::Toggle) => looper.toggle(clock),
                         Msg::Loop(LoopCmd::Stop) => looper.stop(clock),
@@ -574,6 +580,7 @@ struct DrumParams {
     bleed: f32,
     roll_rate: f32,
     roll_strength: f32,
+    damper: bool,
     level: f32,
     choke: Option<u8>,
 }
@@ -601,6 +608,7 @@ impl DrumParams {
             bleed: self.bleed,
             roll_rate: self.roll_rate,
             roll_strength: self.roll_strength,
+            damper: self.damper,
             level: self.level,
             choke: self.choke,
         }
@@ -630,6 +638,7 @@ fn default_pads() -> Vec<DrumParams> {
         bleed: 0.0,
         roll_rate: 14.0,
         roll_strength: 0.75,
+        damper: false,
         level: 0.85,
         choke: None,
     };
@@ -794,8 +803,14 @@ fn default_pads() -> Vec<DrumParams> {
             name: "marimba",
             modes: ModeSet::Marimba,
             freq: 261.63,
-            attack: 0.004,
-            drive: 0.5,
+            attack: 0.003,
+            // The mallet's knock on the wood: quiet, dull, and a
+            // little longer than a click — yarn on rosewood, not a
+            // stick on a block.
+            noise: 0.15,
+            noise_decay: 0.005,
+            noise_tone: 0.6,
+            drive: 0.3,
             // Mallet rolls are softer than stick rolls.
             roll_strength: 0.5,
             level: 0.9,
@@ -809,6 +824,7 @@ fn default_pads() -> Vec<DrumParams> {
             tremolo: 0.5,
             bleed: 0.08,
             roll_strength: 0.5,
+            damper: true,
             level: 0.8,
             ..base
         },
@@ -948,6 +964,11 @@ struct Desk {
     octave: i32,
     /// Melody keys held with shift: (semitone, pad, freq) rolling.
     note_rolls: Vec<(usize, usize, f32)>,
+    /// Melody keys held: (semitone, pad, freq), for the damper on
+    /// release.
+    held_notes: Vec<(usize, usize, f32)>,
+    /// The pedal: no damper on release while on.
+    sustain: bool,
     loop_ctl: Arc<LoopCtl>,
     view: Arc<Mutex<ViewData>>,
     view_ctl: Arc<ViewCtl>,
@@ -1219,6 +1240,9 @@ impl eframe::App for Desk {
                 for (_, pad, f) in self.note_rolls.drain(..) {
                     let _ = self.tx.send(Msg::NoteRoll(pad, f, false));
                 }
+                for (_, pad, f) in self.held_notes.drain(..) {
+                    let _ = self.tx.send(Msg::NoteOff(pad, f));
+                }
                 for k in 0..NPADS {
                     if self.rolling[k] {
                         self.rolling[k] = false;
@@ -1326,6 +1350,7 @@ impl eframe::App for Desk {
                     // The pad's `freq` is the pitch of the A key.
                     let base = self.pads[self.pad_sel].freq;
                     let f = base * 2f32.powf(k as f32 / 12.0 + self.octave as f32);
+                    self.held_notes.push((k, self.pad_sel, f));
                     let _ = self.tx.send(Msg::Note(self.pad_sel, f));
                 }
                 15 => self.octave = (self.octave - 1).max(-3),
@@ -1348,6 +1373,17 @@ impl eframe::App for Desk {
                         }
                     }
                     self.note_rolls = kept;
+                    let mut kept = Vec::new();
+                    for (semi, pad, f) in self.held_notes.drain(..) {
+                        if semi == k {
+                            if !self.sustain {
+                                let _ = self.tx.send(Msg::NoteOff(pad, f));
+                            }
+                        } else {
+                            kept.push((semi, pad, f));
+                        }
+                    }
+                    self.held_notes = kept;
                 }
                 // Left hand fingers, right hand excites: while the bow
                 // is on the string, a key only changes the fingered
@@ -1622,6 +1658,10 @@ impl eframe::App for Desk {
                     }
                     ui.checkbox(&mut self.melody, "melody keys play this pad");
                     if self.melody {
+                        ui.horizontal(|ui| {
+                            edited |= ui.checkbox(&mut p.damper, "damper on release").changed();
+                            ui.checkbox(&mut self.sustain, "sustain pedal");
+                        });
                         ui.small(format!(
                             "A S D F G H J K L ; ' white · W E T Y U O P black · [ ] octave ({:+}) · shift = roll",
                             self.octave
@@ -2201,6 +2241,8 @@ fn main() -> eframe::Result {
         melody: false,
         octave: 0,
         note_rolls: Vec::new(),
+        held_notes: Vec::new(),
+        sustain: false,
         loop_ctl,
         view,
         view_ctl,

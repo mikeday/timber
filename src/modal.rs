@@ -1364,64 +1364,67 @@ pub const SNARE: &[Mode] = &[
 /// A marimba bar: rosewood, arched underneath by the tuner until the
 /// overtones sit at 1 : 4 : 10 (a bar's natural 1 : 2.76 : 5.4 made
 /// nearly harmonic — the craft in the instrument), over a resonator
-/// tube that favors the fundamental. Wood: short. Wants a mallet
-/// (`attack` a few ms): struck with a click it is a xylophone.
+/// tube that favors the fundamental. Rosewood: short, and the knock
+/// of the mallet on wood is part of the note — the pad's click.
+/// Wants a mallet (`attack` a few ms): struck with a click it is a
+/// xylophone.
 pub const MARIMBA: &[Mode] = &[
     Mode {
         ratio: 1.00,
         gain: 1.00,
-        decay: 1.10,
+        decay: 0.55,
     },
     Mode {
         ratio: 4.00,
-        gain: 0.55,
-        decay: 0.35,
+        gain: 0.60,
+        decay: 0.18,
     },
     Mode {
         ratio: 10.00,
         gain: 0.30,
-        decay: 0.12,
+        decay: 0.06,
     },
     Mode {
         ratio: 2.00,
-        gain: 0.12,
-        decay: 0.50,
+        gain: 0.10,
+        decay: 0.30,
     },
     Mode {
         ratio: 17.30,
         gain: 0.10,
-        decay: 0.05,
+        decay: 0.03,
     },
 ];
 
 /// A vibraphone bar: the marimba's tuning in aluminium, so it rings
-/// for seconds; the motor-driven vanes over the tubes are the pad's
-/// `tremolo`.
+/// for seconds — but only with the pedal down; the felt damper bar
+/// (the pad's `damper`) stops it otherwise. The motor-driven vanes
+/// over the tubes are the pad's `tremolo`.
 pub const VIBES: &[Mode] = &[
     Mode {
         ratio: 1.00,
         gain: 1.00,
-        decay: 7.00,
+        decay: 5.00,
     },
     Mode {
         ratio: 4.00,
         gain: 0.45,
-        decay: 3.00,
+        decay: 2.00,
     },
     Mode {
         ratio: 10.00,
         gain: 0.20,
-        decay: 0.90,
+        decay: 0.60,
     },
     Mode {
         ratio: 2.00,
         gain: 0.10,
-        decay: 3.00,
+        decay: 2.00,
     },
     Mode {
         ratio: 17.30,
         gain: 0.06,
-        decay: 0.30,
+        decay: 0.20,
     },
 ];
 

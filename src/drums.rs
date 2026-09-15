@@ -86,6 +86,10 @@ pub struct PadParams {
     /// roll, and that shimmer is most of what a steel band sounds like.
     pub roll_rate: f32,
     pub roll_strength: f32,
+    /// A damper: releasing a note's key stops it (the vibraphone's
+    /// felt bar, which rests on every bar unless the pedal is down).
+    /// Without it a vibraphone is a vibraphone with the pedal jammed.
+    pub damper: bool,
     pub level: f32,
     pub choke: Option<u8>,
 }
@@ -629,6 +633,28 @@ impl Kit {
         }
     }
 
+    /// The key came up: with a damper, the note's felt lands on it
+    /// (the desk's muffle floor — a hand on the metal); a restrike
+    /// lifts it again, since strike_note restores the pad's params.
+    pub fn release_note(&mut self, i: usize, freq: f32) {
+        let Some(src) = self.pads.get(i) else {
+            return;
+        };
+        if !src.p.damper {
+            return;
+        }
+        let damp = src.p.damp * 0.02;
+        for v in self
+            .voices
+            .iter_mut()
+            .filter(|v| v.pad == i && (v.freq / freq - 1.0).abs() < 1e-3)
+        {
+            v.p.p.damp = damp;
+            v.p.refresh = 0;
+            v.rolling = false;
+        }
+    }
+
     /// Roll a note: on while its melody key is held (the press's own
     /// strike is separate). Off stops the roll on that pitch.
     pub fn set_note_roll(&mut self, i: usize, freq: f32, on: bool) {
@@ -710,6 +736,7 @@ mod tests {
             bleed: 0.0,
             roll_rate: 14.0,
             roll_strength: 0.75,
+            damper: false,
             level: 0.8,
             choke: None,
         }
@@ -737,6 +764,7 @@ mod tests {
             bleed: 0.0,
             roll_rate: 14.0,
             roll_strength: 0.75,
+            damper: false,
             level: 0.8,
             choke: Some(0),
         }
@@ -764,6 +792,7 @@ mod tests {
             bleed: 0.0,
             roll_rate: 14.0,
             roll_strength: 0.75,
+            damper: false,
             level: 0.4,
             choke: Some(0),
         }

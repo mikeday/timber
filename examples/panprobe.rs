@@ -33,6 +33,7 @@ fn main() {
         bleed: 0.08,
         roll_rate: 14.0,
         roll_strength: 0.75,
+        damper: false,
         level: 1.0,
         choke: None,
     };

@@ -41,6 +41,7 @@ fn pairs() -> Vec<Pair> {
         bleed: 0.0,
         roll_rate: 14.0,
         roll_strength: 0.75,
+        damper: false,
         level: 1.0,
         choke: None,
     };
