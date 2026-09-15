@@ -1482,3 +1482,78 @@ pub const PAN: &[Mode] = &[
         decay: 0.12,
     },
 ];
+
+/// A cowbell: a tapered steel box with an open mouth, which is two
+/// coupled plates and a cavity. Its voice is a pair of modes a fifth-
+/// and-a-bit apart — the 808's cowbell is two square waves at 540 and
+/// 800 Hz for exactly this reason — with a handful of clangy partials
+/// above, all short and fairly loud. Struck on the mouth with a stick.
+pub const COWBELL: &[Mode] = &[
+    Mode {
+        ratio: 1.00,
+        gain: 1.00,
+        decay: 0.35,
+    },
+    Mode {
+        ratio: 1.48,
+        gain: 0.85,
+        decay: 0.30,
+    },
+    Mode {
+        ratio: 2.10,
+        gain: 0.30,
+        decay: 0.12,
+    },
+    Mode {
+        ratio: 2.65,
+        gain: 0.35,
+        decay: 0.10,
+    },
+    Mode {
+        ratio: 3.40,
+        gain: 0.20,
+        decay: 0.08,
+    },
+    Mode {
+        ratio: 4.30,
+        gain: 0.15,
+        decay: 0.06,
+    },
+    Mode {
+        ratio: 5.60,
+        gain: 0.10,
+        decay: 0.05,
+    },
+];
+
+/// A wood block: a slotted hardwood box, hollow, so it is a Helmholtz
+/// resonance (the fundamental, from the slot and the cavity) under a
+/// few short bar modes. Nearly all click; the "tone" lasts a few
+/// tens of milliseconds.
+pub const WOODBLOCK: &[Mode] = &[
+    Mode {
+        ratio: 1.00,
+        gain: 1.00,
+        decay: 0.08,
+    },
+    Mode {
+        ratio: 2.20,
+        gain: 0.45,
+        decay: 0.05,
+    },
+    Mode {
+        ratio: 3.10,
+        gain: 0.30,
+        decay: 0.04,
+    },
+    Mode {
+        ratio: 4.40,
+        gain: 0.20,
+        decay: 0.03,
+    },
+    Mode {
+        ratio: 6.20,
+        gain: 0.12,
+        decay: 0.02,
+    },
+];

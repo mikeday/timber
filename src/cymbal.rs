@@ -666,20 +666,6 @@ impl Cymbal {
 pub fn default_kit() -> Vec<(&'static str, CymbalParams)> {
     vec![
         (
-            "ride",
-            CymbalParams {
-                stiffness: 0.8,
-                dome: 90.0,
-                decay: 5.0,
-                hf_damp: 0.3,
-                strike_pos: 0.5,
-                hardness: 0.95,
-                mallet: 1.0,
-                nonlin: 1000.0,
-                level: 0.5,
-            },
-        ),
-        (
             "crash",
             CymbalParams {
                 stiffness: 0.5,
@@ -691,6 +677,24 @@ pub fn default_kit() -> Vec<(&'static str, CymbalParams)> {
                 mallet: 1.2,
                 nonlin: 4000.0,
                 level: 0.5,
+            },
+        ),
+        (
+            "ride",
+            CymbalParams {
+                stiffness: 0.8,
+                dome: 90.0,
+                decay: 3.5,
+                hf_damp: 0.3,
+                strike_pos: 0.5,
+                hardness: 0.95,
+                mallet: 1.0,
+                nonlin: 1000.0,
+                // Quiet, and shorter than a ride could be: its ring
+                // outlasts the hits, so a ridden pattern piles up eight
+                // hits' worth of energy — into the master limiter,
+                // which turns a dense inharmonic ring into static.
+                level: 0.3,
             },
         ),
     ]

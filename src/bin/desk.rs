@@ -14,10 +14,12 @@
 //! tongue surface, a live tube-profile drawing, and a phoneme box that
 //! speaks through timber::speak.
 //!
-//! Keys: the number row 1..= is the modal kit (shift = roll); the
-//! bottom row is the physical kit — Z X C V B mesh drums, N M cymbals
-//! (shift = hard hit), , . hi-hat closed/open, hold / for the foot ·
-//! space = loop ·
+//! Keys: the number keys pick a bank (1 modal kit, 2 physical kit,
+//! 3 percussion, 4–7 tuned instruments on the melody keys; tab flips
+//! modal ↔ physical) and the bottom row Z..= / plays it — the two kits
+//! mirror each other: kick snare toms | hat open-hat | crash ride |
+//! clap or foot (shift = roll on the modal kit, hard hit on the
+//! physical) · space = loop ·
 //! A S D F G H J K =
 //! pluck strings (finger while bowing; melody while a voice engine is
 //! held or speaking) · Q W E R T = vowels (steer the held engine).
@@ -518,6 +520,8 @@ enum ModeSet {
     Marimba,
     Vibes,
     Pan,
+    Cowbell,
+    Woodblock,
     NoiseOnly,
 }
 
@@ -536,6 +540,8 @@ impl ModeSet {
             ModeSet::Marimba => modal::MARIMBA,
             ModeSet::Vibes => modal::VIBES,
             ModeSet::Pan => modal::PAN,
+            ModeSet::Cowbell => modal::COWBELL,
+            ModeSet::Woodblock => modal::WOODBLOCK,
             ModeSet::NoiseOnly => &[],
         }
     }
@@ -553,6 +559,8 @@ impl ModeSet {
             ModeSet::Marimba => "marimba bar",
             ModeSet::Vibes => "vibraphone bar",
             ModeSet::Pan => "steel pan",
+            ModeSet::Cowbell => "cowbell",
+            ModeSet::Woodblock => "wood block",
             ModeSet::NoiseOnly => "noise only",
         }
     }
@@ -721,23 +729,6 @@ fn default_pads() -> Vec<DrumParams> {
             choke: Some(0),
             ..base
         },
-        DrumParams {
-            name: "bell",
-            modes: ModeSet::Bell,
-            freq: 440.0,
-            level: 0.6,
-            ..base
-        },
-        // The strike's contact click is a whisper of very fast rattle.
-        DrumParams {
-            name: "triangle",
-            modes: ModeSet::Triangle,
-            freq: 1180.0,
-            noise: 0.04,
-            noise_decay: 0.002,
-            level: 0.5,
-            ..base
-        },
         // Synth cymbals: the CYMBAL partial table with the pad's noise
         // burst as the wash. The crash is mostly wash, the ride mostly
         // partials with a short sizzle.
@@ -769,6 +760,58 @@ fn default_pads() -> Vec<DrumParams> {
             level: 0.45,
             ..base
         },
+        // The 808's handclap: four bursts of bandpassed noise, the last
+        // with a tail.
+        DrumParams {
+            name: "clap",
+            modes: ModeSet::NoiseOnly,
+            noise: 1.0,
+            noise_decay: 0.1,
+            noise_tone: 0.7,
+            claps: 4,
+            level: 0.5,
+            ..base
+        },
+        // A cowbell at the 808's pitch, struck with a stick: a hard,
+        // bright knock and a short clang.
+        DrumParams {
+            name: "cowbell",
+            modes: ModeSet::Cowbell,
+            freq: 540.0,
+            noise: 0.25,
+            noise_decay: 0.003,
+            drive: 0.8,
+            level: 0.5,
+            ..base
+        },
+        // A wood block: the knock is most of it.
+        DrumParams {
+            name: "wood block",
+            modes: ModeSet::Woodblock,
+            freq: 800.0,
+            noise: 0.5,
+            noise_decay: 0.004,
+            noise_tone: 0.3,
+            level: 0.55,
+            ..base
+        },
+        DrumParams {
+            name: "bell",
+            modes: ModeSet::Bell,
+            freq: 440.0,
+            level: 0.6,
+            ..base
+        },
+        // The strike's contact click is a whisper of very fast rattle.
+        DrumParams {
+            name: "triangle",
+            modes: ModeSet::Triangle,
+            freq: 1180.0,
+            noise: 0.04,
+            noise_decay: 0.002,
+            level: 0.5,
+            ..base
+        },
         // Tam-tam: low, loud lows, ten-second decays, and the swell —
         // the bloom arriving 150 ms after the strike over 400 ms.
         DrumParams {
@@ -783,18 +826,6 @@ fn default_pads() -> Vec<DrumParams> {
             bloom_spread: 0.4,
             drive: 0.4,
             shimmer: 0.6,
-            level: 0.5,
-            ..base
-        },
-        // The 808's handclap: four bursts of bandpassed noise, the last
-        // with a tail.
-        DrumParams {
-            name: "clap",
-            modes: ModeSet::NoiseOnly,
-            noise: 1.0,
-            noise_decay: 0.1,
-            noise_tone: 0.7,
-            claps: 4,
             level: 0.5,
             ..base
         },
@@ -868,11 +899,25 @@ const VOWELS: [(&str, Vowel); 5] = [
     ("oh", voice::OH),
 ];
 
-/// Pad keys, matched against the *physical* key when the event carries
-/// one (shift can change the logical key on some layouts — QWERTZ turns
-/// shift+',' into ';' — which would strand roll state). Must stay in
-/// step with default_pads(): asserted at startup.
-const DRUM_KEYS: [egui::Key; 12] = [
+/// The bottom row plays whichever bank is selected; the number keys
+/// select the bank. Keys are matched against the *physical* key when
+/// the event carries one (shift can change the logical key on some
+/// layouts — QWERTZ turns shift+',' into ';' — which would strand roll
+/// state).
+const ROW_KEYS: [egui::Key; 10] = [
+    egui::Key::Z,
+    egui::Key::X,
+    egui::Key::C,
+    egui::Key::V,
+    egui::Key::B,
+    egui::Key::N,
+    egui::Key::M,
+    egui::Key::Comma,
+    egui::Key::Period,
+    egui::Key::Slash,
+];
+const NROW: usize = ROW_KEYS.len();
+const BANK_KEYS: [egui::Key; 7] = [
     egui::Key::Num1,
     egui::Key::Num2,
     egui::Key::Num3,
@@ -880,33 +925,77 @@ const DRUM_KEYS: [egui::Key; 12] = [
     egui::Key::Num5,
     egui::Key::Num6,
     egui::Key::Num7,
-    egui::Key::Num8,
-    egui::Key::Num9,
-    egui::Key::Num0,
-    egui::Key::Minus,
-    egui::Key::Equals,
 ];
-const NPADS: usize = DRUM_KEYS.len();
-/// The physical kit lives on the bottom row: mesh pads, then the
-/// cymbals, then the hi-hat and its pedal. Shift = a hard hit (the
-/// tension glide and the snare's full rattle only show up when the
-/// stick really lands).
-const MESH_KEYS: [egui::Key; 5] = [
-    egui::Key::Z,
-    egui::Key::X,
-    egui::Key::C,
-    egui::Key::V,
-    egui::Key::B,
+
+/// A bank: what the bottom row plays. The two kits mirror each other
+/// slot for slot (kick snare toms | hat open-hat | crash ride | extra)
+/// so a beat transfers between them with one key — and the hats sit
+/// under the first fingers of the right hand, where the eighths go.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Bank {
+    /// The modal kit (shift = roll).
+    Modal,
+    /// The physical kit: mesh drums, modal-plate cymbals, the two-plate
+    /// hi-hat with its foot on the last key (shift = hard hit).
+    Physical,
+    /// The modal kit's other percussion: bell, triangle, gong, clap,
+    /// cowbell, wood block.
+    Percussion,
+    /// A tuned modal pad on the melody keys.
+    Tuned(&'static str),
+}
+
+const BANKS: [Bank; 7] = [
+    Bank::Modal,
+    Bank::Physical,
+    Bank::Percussion,
+    Bank::Tuned("marimba"),
+    Bank::Tuned("vibes"),
+    Bank::Tuned("steel pan"),
+    Bank::Tuned("bell"),
 ];
-const NMESH: usize = MESH_KEYS.len();
-/// Cymbal pads: N M. Shift = hard hit.
-const CYMBAL_KEYS: [egui::Key; 2] = [egui::Key::N, egui::Key::M];
-/// Hi-hat: closed hit, open hit — two keys, like the modal pair — and
-/// the foot on the spare key (held: chick, and closing an open hat).
-const HAT_KEY: egui::Key = egui::Key::Comma;
-const OPEN_HAT_KEY: egui::Key = egui::Key::Period;
-const PEDAL_KEY: egui::Key = egui::Key::Slash;
-const NCYMBAL: usize = CYMBAL_KEYS.len();
+
+impl Bank {
+    fn name(self) -> String {
+        match self {
+            Bank::Modal => "modal kit".into(),
+            Bank::Physical => "physical kit".into(),
+            Bank::Percussion => "percussion".into(),
+            Bank::Tuned(n) => n.into(),
+        }
+    }
+}
+
+/// What one bottom-row key does in the current bank.
+#[derive(Clone, Copy, PartialEq)]
+enum Slot {
+    None,
+    /// A modal pad, by index into the pad list.
+    Pad(usize),
+    Mesh(usize),
+    Cymbal(usize),
+    HatClosed,
+    HatOpen,
+    Foot,
+}
+
+const MODAL_ROW: [&str; 10] = [
+    "kick", "snare", "tom hi", "tom", "tom lo", "hat", "open hat", "crash", "ride", "clap",
+];
+/// The modal objects that don't fit on the kit row; the rest of the
+/// row is empty rather than repeating bank 1.
+const PERC_ROW: [&str; 10] = [
+    "bell",
+    "triangle",
+    "gong",
+    "clap",
+    "cowbell",
+    "wood block",
+    "",
+    "",
+    "",
+    "",
+];
 const NOTE_KEYS: [egui::Key; 8] = [
     egui::Key::A,
     egui::Key::S,
@@ -977,8 +1066,11 @@ struct Desk {
     gain_mesh: f32,
     gain_cymbal: f32,
     gain_ladder: f32,
-    rolling: [bool; NPADS],
-    drum_down: [bool; NPADS],
+    bank: Bank,
+    /// The bottom row: which keys are held, and which pad each held
+    /// key is rolling (shift), by row slot.
+    row_down: [bool; NROW],
+    row_rolling: [Option<usize>; NROW],
     last_mouth_pos: Option<egui::Pos2>,
 
     note: Note,
@@ -993,6 +1085,81 @@ impl Desk {
         let _ = self.tx.send(Msg::Strike(pad));
     }
 
+    fn pad_named(&self, name: &str) -> Option<usize> {
+        self.pads.iter().position(|p| p.name == name)
+    }
+
+    /// The bottom row's ten slots for the current bank.
+    fn slots(&self) -> [Slot; NROW] {
+        let mut s = [Slot::None; NROW];
+        match self.bank {
+            Bank::Modal | Bank::Percussion => {
+                let names = if self.bank == Bank::Modal {
+                    MODAL_ROW
+                } else {
+                    PERC_ROW
+                };
+                for (k, n) in names.iter().enumerate() {
+                    if !n.is_empty()
+                        && let Some(i) = self.pad_named(n)
+                    {
+                        s[k] = Slot::Pad(i);
+                    }
+                }
+            }
+            Bank::Physical => {
+                for k in 0..5 {
+                    s[k] = Slot::Mesh(k);
+                }
+                let cym = |name: &str| {
+                    self.cymbal_pads
+                        .iter()
+                        .position(|(n, _)| *n == name)
+                        .map(Slot::Cymbal)
+                        .unwrap_or(Slot::None)
+                };
+                s[5] = Slot::HatClosed;
+                s[6] = Slot::HatOpen;
+                s[7] = cym("crash");
+                s[8] = cym("ride");
+                s[9] = Slot::Foot;
+            }
+            Bank::Tuned(_) => {}
+        }
+        s
+    }
+
+    /// Switch bank: stop anything the row was holding, and put the
+    /// melody keys on a tuned bank's pad.
+    fn select_bank(&mut self, bank: Bank) {
+        self.release_row();
+        self.bank = bank;
+        match bank {
+            Bank::Tuned(name) => {
+                if let Some(i) = self.pad_named(name) {
+                    self.pad_sel = i;
+                }
+                self.melody = true;
+            }
+            _ => self.melody = false,
+        }
+    }
+
+    /// Everything the bottom row is holding, let go (bank switch, a
+    /// text field taking the keyboard).
+    fn release_row(&mut self) {
+        self.row_down = [false; NROW];
+        for k in 0..NROW {
+            if let Some(pad) = self.row_rolling[k].take() {
+                let _ = self.tx.send(Msg::Roll(pad, false));
+            }
+        }
+        if self.pedal_down {
+            self.pedal_down = false;
+            let _ = self.tx.send(Msg::HatPedal(false));
+        }
+    }
+
     fn strike_mesh(&mut self, pad: usize, hard: bool) {
         self.mesh_sel = pad;
         let strength = if hard { 1.6 } else { 0.8 };
@@ -1001,7 +1168,9 @@ impl Desk {
 
     fn strike_cymbal(&mut self, pad: usize, hard: bool) {
         self.cymbal_sel = pad;
-        let strength = if hard { 1.6 } else { 0.8 };
+        // A gentler "hard" than the drums': a cymbal's ring sums over
+        // hits, and 1.6 repeated ran the limiter into static.
+        let strength = if hard { 1.25 } else { 0.8 };
         let _ = self.tx.send(Msg::CymbalStrike(pad, strength));
     }
 
@@ -1027,6 +1196,24 @@ impl Desk {
 /// ("rattle decay" ≈ 82 + 48 + 16) without spilling into the next column.
 fn track_width(ui: &egui::Ui) -> f32 {
     (ui.available_width() - 170.0).clamp(40.0, 200.0)
+}
+
+/// A key as it is printed on the cap.
+fn key_label(key: egui::Key) -> &'static str {
+    use egui::Key::*;
+    match key {
+        Z => "Z",
+        X => "X",
+        C => "C",
+        V => "V",
+        B => "B",
+        N => "N",
+        M => "M",
+        Comma => ",",
+        Period => ".",
+        Slash => "/",
+        _ => "?",
+    }
 }
 
 /// The chromatic keyboard for the melody keys: white keys along the
@@ -1232,22 +1419,12 @@ impl eframe::App for Desk {
             if typing {
                 // A focused text field owns the keyboard: no plucks,
                 // strikes or rolls while spelling out phonemes.
-                self.drum_down = [false; NPADS];
-                if self.pedal_down {
-                    self.pedal_down = false;
-                    let _ = self.tx.send(Msg::HatPedal(false));
-                }
+                self.release_row();
                 for (_, pad, f) in self.note_rolls.drain(..) {
                     let _ = self.tx.send(Msg::NoteRoll(pad, f, false));
                 }
                 for (_, pad, f) in self.held_notes.drain(..) {
                     let _ = self.tx.send(Msg::NoteOff(pad, f));
-                }
-                for k in 0..NPADS {
-                    if self.rolling[k] {
-                        self.rolling[k] = false;
-                        let _ = self.tx.send(Msg::Roll(k, false));
-                    }
                 }
                 return;
             }
@@ -1263,16 +1440,35 @@ impl eframe::App for Desk {
                     continue;
                 };
                 let key = physical_key.unwrap_or(*key);
-                if key == PEDAL_KEY {
-                    // The pedal: down while held, up on release.
-                    if !*repeat && *pressed != self.pedal_down {
-                        self.pedal_down = *pressed;
-                        acts.push((if *pressed { 12 } else { 13 }, 0));
+                if *pressed && !*repeat && key == egui::Key::Tab {
+                    acts.push((19, 0));
+                } else if *pressed
+                    && !*repeat
+                    && let Some(b) = BANK_KEYS.iter().position(|d| *d == key)
+                {
+                    acts.push((20, b));
+                } else if let Some(k) = ROW_KEYS.iter().position(|d| *d == key) {
+                    let slot = self.slots()[k];
+                    self.row_down[k] = *pressed;
+                    match slot {
+                        Slot::Foot => {
+                            // The foot: down while held, up on release.
+                            if !*repeat && *pressed != self.pedal_down {
+                                self.pedal_down = *pressed;
+                                acts.push((if *pressed { 12 } else { 13 }, 0));
+                            }
+                        }
+                        Slot::Pad(p) if *pressed && !*repeat => acts.push((0, p)),
+                        Slot::Mesh(p) if *pressed && !*repeat => {
+                            acts.push((if i.modifiers.shift { 4 } else { 3 }, p))
+                        }
+                        Slot::Cymbal(p) if *pressed && !*repeat => {
+                            acts.push((if i.modifiers.shift { 6 } else { 5 }, p))
+                        }
+                        Slot::HatClosed if *pressed && !*repeat => acts.push((11, 0)),
+                        Slot::HatOpen if *pressed && !*repeat => acts.push((11, 1)),
+                        _ => {}
                     }
-                } else if *pressed && !*repeat && key == HAT_KEY {
-                    acts.push((11, 0));
-                } else if *pressed && !*repeat && key == OPEN_HAT_KEY {
-                    acts.push((11, 1));
                 } else if *pressed && !*repeat && key == egui::Key::Space {
                     acts.push((if i.modifiers.shift { 10 } else { 7 }, 0));
                 } else if *pressed && !*repeat && key == egui::Key::Backspace {
@@ -1293,30 +1489,30 @@ impl eframe::App for Desk {
                     acts.push((15, 0));
                 } else if self.melody && *pressed && !*repeat && key == egui::Key::CloseBracket {
                     acts.push((16, 0));
-                } else if let Some(k) = DRUM_KEYS.iter().position(|d| *d == key) {
-                    self.drum_down[k] = *pressed;
-                    if *pressed && !*repeat {
-                        acts.push((0, k));
-                    }
                 } else if *pressed && !*repeat {
-                    if let Some(k) = MESH_KEYS.iter().position(|d| *d == key) {
-                        acts.push((if i.modifiers.shift { 4 } else { 3 }, k));
-                    } else if let Some(k) = CYMBAL_KEYS.iter().position(|d| *d == key) {
-                        acts.push((if i.modifiers.shift { 6 } else { 5 }, k));
-                    } else if let Some(k) = NOTE_KEYS.iter().position(|d| *d == key) {
+                    if let Some(k) = NOTE_KEYS.iter().position(|d| *d == key) {
                         acts.push((1, k));
                     } else if let Some(k) = VOWEL_KEYS.iter().position(|d| *d == key) {
                         acts.push((2, k));
                     }
                 }
             }
-            // Shift+drum-key held = roll; a plain press stays a clean
-            // single hit.
-            for k in 0..NPADS {
-                let down = self.drum_down[k] && i.modifiers.shift;
-                if down != self.rolling[k] {
-                    self.rolling[k] = down;
-                    let _ = self.tx.send(Msg::Roll(k, down));
+            // Shift + a held modal pad key = roll; a plain press stays a
+            // clean single hit.
+            let slots = self.slots();
+            for k in 0..NROW {
+                let want = match slots[k] {
+                    Slot::Pad(p) if self.row_down[k] && i.modifiers.shift => Some(p),
+                    _ => None,
+                };
+                if want != self.row_rolling[k] {
+                    if let Some(pad) = self.row_rolling[k] {
+                        let _ = self.tx.send(Msg::Roll(pad, false));
+                    }
+                    if let Some(pad) = want {
+                        let _ = self.tx.send(Msg::Roll(pad, true));
+                    }
+                    self.row_rolling[k] = want;
                 }
             }
         });
@@ -1373,6 +1569,17 @@ impl eframe::App for Desk {
                     self.note_rolls.push((k, self.pad_sel, f));
                     let _ = self.tx.send(Msg::NoteRoll(self.pad_sel, f, true));
                 }
+                // Banks: number keys pick one; Tab flips between the two
+                // kits, which mirror each other slot for slot.
+                19 => {
+                    let next = if self.bank == Bank::Physical {
+                        Bank::Modal
+                    } else {
+                        Bank::Physical
+                    };
+                    self.select_bank(next);
+                }
+                20 => self.select_bank(BANKS[k]),
                 18 => {
                     let mut kept = Vec::new();
                     for (semi, pad, f) in self.note_rolls.drain(..) {
@@ -1567,10 +1774,42 @@ impl eframe::App for Desk {
             ui.small("space — loop: record / close & play / overdub ↔ jam");
             ui.small("shift+space — stop / restart");
             ui.small("backspace — undo last layer (shift: clear)");
-            ui.small("1 2 3 4 5 6 7 8 9 0 - = — modal kit (shift = roll); clap and tuned pads: click or melody keys");
-            ui.small("melody keys (when on): home row white, W E T Y U O P black, [ ] octave, shift = roll");
-            ui.small("Z X C V B — mesh drums · N M — cymbals (shift = hard hit)");
-            ui.small(", . — hi-hat closed / open · hold / — foot (chick, close)");
+            ui.label("bank");
+            ui.horizontal_wrapped(|ui| {
+                for (k, b) in BANKS.iter().enumerate() {
+                    let label = format!("{} {}", k + 1, b.name());
+                    if ui.selectable_label(self.bank == *b, label).clicked() {
+                        self.select_bank(*b);
+                    }
+                }
+            });
+            let row: Vec<String> = {
+                let slots = self.slots();
+                ROW_KEYS
+                    .iter()
+                    .zip(slots.iter())
+                    .map(|(key, s)| {
+                        let what = match s {
+                            Slot::None => "—".to_string(),
+                            Slot::Pad(i) => self.pads[*i].name.to_string(),
+                            Slot::Mesh(i) => self.mesh_pads[*i].0.to_string(),
+                            Slot::Cymbal(i) => self.cymbal_pads[*i].0.to_string(),
+                            Slot::HatClosed => "hat".into(),
+                            Slot::HatOpen => "open hat".into(),
+                            Slot::Foot => "foot".into(),
+                        };
+                        format!("{}:{}", key_label(*key), what)
+                    })
+                    .collect()
+            };
+            match self.bank {
+                Bank::Tuned(_) => ui.small(
+                    "melody keys: home row white, W E T Y U O P black, [ ] octave, shift = roll",
+                ),
+                Bank::Physical => ui.small(format!("{}  (shift = hard hit)", row.join(" "))),
+                _ => ui.small(format!("{}  (shift = roll)", row.join(" "))),
+            };
+            ui.small("1–7 — bank · tab — modal ↔ physical");
             ui.small("A S D F G H J K — pluck (finger, while bowing)");
             ui.small("Q W E R T — vowels");
             ui.small("hold bow surface — bow");
@@ -1619,6 +1858,8 @@ impl eframe::App for Desk {
                                 ModeSet::Marimba,
                                 ModeSet::Vibes,
                                 ModeSet::Pan,
+                                ModeSet::Cowbell,
+                                ModeSet::Woodblock,
                                 ModeSet::NoiseOnly,
                             ] {
                                 edited |= ui.selectable_value(&mut p.modes, m, m.name()).changed();
@@ -2176,12 +2417,21 @@ fn main() -> eframe::Result {
     let (tx, rx) = channel();
     let freqs = NOTES.iter().map(|(_, f)| *f).collect();
     let pads = default_pads();
-    assert!(pads.len() >= NPADS, "fewer pads than DRUM_KEYS");
+    for n in MODAL_ROW.iter().chain(PERC_ROW.iter()) {
+        assert!(
+            n.is_empty() || pads.iter().any(|p| p.name == *n),
+            "no modal pad named {n}"
+        );
+    }
+    for b in BANKS {
+        if let Bank::Tuned(n) = b {
+            assert!(pads.iter().any(|p| p.name == n), "no tuned pad named {n}");
+        }
+    }
     let mesh_pads = mesh::default_kit();
-    assert_eq!(
-        mesh_pads.len(),
-        NMESH,
-        "MESH_KEYS and mesh::default_kit out of step"
+    assert!(
+        mesh_pads.len() >= 5,
+        "the physical bank wants five mesh pads"
     );
     // The cymbal's modes and coupling tensor: a second or so of eigen-
     // decomposition, once.
@@ -2217,11 +2467,12 @@ fn main() -> eframe::Result {
         energy: AtomicBool::new(true),
     });
     let cymbal_pads = cymbal::default_kit();
-    assert_eq!(
-        cymbal_pads.len(),
-        NCYMBAL,
-        "CYMBAL_KEYS and cymbal::default_kit out of step"
-    );
+    for n in ["crash", "ride"] {
+        assert!(
+            cymbal_pads.iter().any(|(c, _)| *c == n),
+            "no cymbal named {n}"
+        );
+    }
     let stream = start_audio(
         mixer.clone(),
         ctl.clone(),
@@ -2269,8 +2520,9 @@ fn main() -> eframe::Result {
         gain_mesh: 1e-3,
         gain_cymbal: 1e-3,
         gain_ladder: 1e-3,
-        rolling: [false; NPADS],
-        drum_down: [false; NPADS],
+        bank: Bank::Modal,
+        row_down: [false; NROW],
+        row_rolling: [None; NROW],
         last_mouth_pos: None,
         note: Note::default(),
         from_vowel: 1, // ee → ah: "yah"

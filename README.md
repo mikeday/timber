@@ -14,9 +14,9 @@ Models, in `src/`:
   waveguide string with a stick-slip bow, sympathetic coupling and a
   drone mode.
 - `modal` / `drums` — a modal kit: resonator banks with typed-in mode
-  tables (membranes, a snare head, a church bell, triangle, marimba
-  and vibraphone bars, a steel pan, and synth cymbal/ride/gong/hi-hat
-  pictures), plus rattle, shimmer, drive, a wash bloom, a mallet
+  tables (membranes, a snare head, a church bell, triangle, cowbell,
+  wood block, marimba and vibraphone bars, a steel pan, and synth
+  cymbal/ride/gong/hi-hat pictures), plus rattle, shimmer, drive, a wash bloom, a mallet
   attack, tremolo, rolls and the 808 handclap. Tuned pads play
   polyphonically from the melody keys; the steel pan's table and
   envelope were fitted to recordings. The "record" drums, and tuned
@@ -49,14 +49,17 @@ Models, in `src/`:
     cargo run --release --bin desk
 
 The desk is a realtime mixing desk (egui + cpal). Keys: the number
-row `1`–`=` plays the modal kit (shift = roll); the bottom row plays
-the physical kit — `Z X C V B` mesh drums, `N M` cymbals (shift =
-hard hit), `,` and `.` the hi-hat closed and open, `/` held as the
-foot. `A S D F G H J K` pluck strings and `Q W E R T` steer vowels —
+keys pick a *bank* — `1` the modal kit, `2` the physical kit, `3` bell,
+triangle, gong, clap, cowbell and wood block, `4`–`7` marimba, vibes, steel pan and
+bell on the melody keys — and the bottom row `Z X C V B N M , . /`
+plays it (`Tab` flips modal ↔ physical). The two kits mirror each
+other slot for slot: kick, snare, three toms, hat, open hat, crash,
+ride, then the clap (modal) or the hi-hat's foot, held (physical).
+Shift is a roll on the modal kit and a hard hit on the physical one. `A S D F G H J K` pluck strings and `Q W E R T` steer vowels —
 or, with "melody keys" on for a modal pad, the home row plays that
 pad chromatically (white keys `A`–`'`, black `W E T Y U O P`, `[ ]`
-octave, shift = roll the note). The clap, marimba, vibes and steel pan
-have no pad key: click them, or (tuned) play the melody keys. Hold the bow
+octave, shift = roll the note). Any pad can also be clicked, and any modal pad played from the
+melody keys with "melody keys" on. Hold the bow
 surface to bow, the mouth surface to sing; type phonemes in the tract
 box to speak. `Space` runs the looper (record → play → overdub ↔ jam;
 shift+Space stops), `Backspace` undoes a layer (shift+Backspace
