@@ -49,14 +49,14 @@ Models, in `src/`:
     cargo run --release --bin desk
 
 The desk is a realtime mixing desk (egui + cpal). Keys: the number
-row `1`–`=` plays the modal kit and `/` the clap (shift = roll); the
-bottom row plays the physical kit — `Z X C V B` mesh drums, `N M`
-cymbals (shift = hard hit), `,` the hi-hat with `.` held as the
-pedal. `A S D F G H J K` pluck strings and `Q W E R T` steer vowels —
+row `1`–`=` plays the modal kit (shift = roll); the bottom row plays
+the physical kit — `Z X C V B` mesh drums, `N M` cymbals (shift =
+hard hit), `,` and `.` the hi-hat closed and open, `/` held as the
+foot. `A S D F G H J K` pluck strings and `Q W E R T` steer vowels —
 or, with "melody keys" on for a modal pad, the home row plays that
 pad chromatically (white keys `A`–`'`, black `W E T Y U O P`, `[ ]`
-octave, shift = roll the note). The marimba, vibes and steel pan have
-no pad key: select them and play the melody keys. Hold the bow
+octave, shift = roll the note). The clap, marimba, vibes and steel pan
+have no pad key: click them, or (tuned) play the melody keys. Hold the bow
 surface to bow, the mouth surface to sing; type phonemes in the tract
 box to speak. `Space` runs the looper (record → play → overdub ↔ jam;
 shift+Space stops), `Backspace` undoes a layer (shift+Backspace

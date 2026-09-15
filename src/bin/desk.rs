@@ -16,7 +16,8 @@
 //!
 //! Keys: the number row 1..= is the modal kit (shift = roll); the
 //! bottom row is the physical kit — Z X C V B mesh drums, N M cymbals
-//! (shift = hard hit), , hi-hat, hold . for the pedal · space = loop ·
+//! (shift = hard hit), , . hi-hat closed/open, hold / for the foot ·
+//! space = loop ·
 //! A S D F G H J K =
 //! pluck strings (finger while bowing; melody while a voice engine is
 //! held or speaking) · Q W E R T = vowels (steer the held engine).
@@ -871,7 +872,7 @@ const VOWELS: [(&str, Vowel); 5] = [
 /// one (shift can change the logical key on some layouts — QWERTZ turns
 /// shift+',' into ';' — which would strand roll state). Must stay in
 /// step with default_pads(): asserted at startup.
-const DRUM_KEYS: [egui::Key; 13] = [
+const DRUM_KEYS: [egui::Key; 12] = [
     egui::Key::Num1,
     egui::Key::Num2,
     egui::Key::Num3,
@@ -884,9 +885,6 @@ const DRUM_KEYS: [egui::Key; 13] = [
     egui::Key::Num0,
     egui::Key::Minus,
     egui::Key::Equals,
-    // The spare bottom-row key takes the clap; pads beyond these are
-    // played by clicking, or by the melody keys.
-    egui::Key::Slash,
 ];
 const NPADS: usize = DRUM_KEYS.len();
 /// The physical kit lives on the bottom row: mesh pads, then the
@@ -903,9 +901,11 @@ const MESH_KEYS: [egui::Key; 5] = [
 const NMESH: usize = MESH_KEYS.len();
 /// Cymbal pads: N M. Shift = hard hit.
 const CYMBAL_KEYS: [egui::Key; 2] = [egui::Key::N, egui::Key::M];
-/// Hi-hat: stick, and the pedal (held).
+/// Hi-hat: closed hit, open hit — two keys, like the modal pair — and
+/// the foot on the spare key (held: chick, and closing an open hat).
 const HAT_KEY: egui::Key = egui::Key::Comma;
-const PEDAL_KEY: egui::Key = egui::Key::Period;
+const OPEN_HAT_KEY: egui::Key = egui::Key::Period;
+const PEDAL_KEY: egui::Key = egui::Key::Slash;
 const NCYMBAL: usize = CYMBAL_KEYS.len();
 const NOTE_KEYS: [egui::Key; 8] = [
     egui::Key::A,
@@ -1270,7 +1270,9 @@ impl eframe::App for Desk {
                         acts.push((if *pressed { 12 } else { 13 }, 0));
                     }
                 } else if *pressed && !*repeat && key == HAT_KEY {
-                    acts.push((11, if i.modifiers.shift { 1 } else { 0 }));
+                    acts.push((11, 0));
+                } else if *pressed && !*repeat && key == OPEN_HAT_KEY {
+                    acts.push((11, 1));
                 } else if *pressed && !*repeat && key == egui::Key::Space {
                     acts.push((if i.modifiers.shift { 10 } else { 7 }, 0));
                 } else if *pressed && !*repeat && key == egui::Key::Backspace {
@@ -1337,8 +1339,16 @@ impl eframe::App for Desk {
                 10 => {
                     let _ = self.tx.send(Msg::Loop(LoopCmd::Stop));
                 }
+                // The hat as a pair of pads: `,` a closed hit, `.` an open
+                // one — the key sets the foot, so a beat's closed eighths
+                // and the odd open hit are one hand. (`/` held is the foot
+                // itself: chick, and closing an open hat.)
                 11 => {
-                    let _ = self.tx.send(Msg::HatStrike(if k == 1 { 1.6 } else { 0.8 }));
+                    let open = k == 1;
+                    if !self.pedal_down {
+                        let _ = self.tx.send(Msg::HatPedal(!open));
+                    }
+                    let _ = self.tx.send(Msg::HatStrike(0.9));
                 }
                 12 => {
                     let _ = self.tx.send(Msg::HatPedal(true));
@@ -1557,10 +1567,10 @@ impl eframe::App for Desk {
             ui.small("space — loop: record / close & play / overdub ↔ jam");
             ui.small("shift+space — stop / restart");
             ui.small("backspace — undo last layer (shift: clear)");
-            ui.small("1 2 3 4 5 6 7 8 9 0 - = / — modal kit (shift = roll)");
+            ui.small("1 2 3 4 5 6 7 8 9 0 - = — modal kit (shift = roll); clap and tuned pads: click or melody keys");
             ui.small("melody keys (when on): home row white, W E T Y U O P black, [ ] octave, shift = roll");
             ui.small("Z X C V B — mesh drums · N M — cymbals (shift = hard hit)");
-            ui.small(", — hi-hat (shift = hard) · hold . — pedal down");
+            ui.small(", . — hi-hat closed / open · hold / — foot (chick, close)");
             ui.small("A S D F G H J K — pluck (finger, while bowing)");
             ui.small("Q W E R T — vowels");
             ui.small("hold bow surface — bow");
@@ -1874,8 +1884,17 @@ impl eframe::App for Desk {
                     ui.separator();
                     ui.heading("hi-hat · two plates");
                     ui.horizontal(|ui| {
-                        if ui.button("hit").clicked() {
-                            let _ = self.tx.send(Msg::HatStrike(0.8));
+                        if ui.button("closed").clicked() {
+                            if !self.pedal_down {
+                                let _ = self.tx.send(Msg::HatPedal(true));
+                            }
+                            let _ = self.tx.send(Msg::HatStrike(0.9));
+                        }
+                        if ui.button("open").clicked() {
+                            if !self.pedal_down {
+                                let _ = self.tx.send(Msg::HatPedal(false));
+                            }
+                            let _ = self.tx.send(Msg::HatStrike(0.9));
                         }
                         let mut down = self.pedal_down;
                         if ui.toggle_value(&mut down, "pedal").changed() {
@@ -1891,6 +1910,7 @@ impl eframe::App for Desk {
                     edited |= slider(ui, &mut h.plate.hf_damp, 0.0..=1.0, false, "hf damp");
                     edited |= slider(ui, &mut h.gap, 0.02..=1.0, true, "gap");
                     edited |= slider(ui, &mut h.press, 0.0..=1.0, false, "press");
+                    edited |= slider(ui, &mut h.click, 0.0..=2.0, false, "stick click");
                     edited |= slider(ui, &mut h.level, 0.0..=4.0, false, "level");
                     if edited {
                         let _ = self.tx.send(Msg::HatPad(*h));

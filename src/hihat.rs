@@ -16,7 +16,7 @@
 use std::sync::Arc;
 
 use crate::cymbal::{Cymbal, CymbalParams, Modes};
-use crate::util::Rng;
+use crate::util::{Rng, SR};
 
 /// Contact points around the plates, at this fraction of the radius.
 const CONTACTS: usize = 12;
@@ -68,6 +68,10 @@ pub struct HiHatParams {
     /// How far the foot goes down with the pedal key, 0..1 of the
     /// gap: 1 is closed tight, less leaves it "half open".
     pub press: f32,
+    /// The stick's own contact noise on the top plate: a millisecond
+    /// of bright noise. On a real hat that tick carries the 5–10 kHz
+    /// the plates' modes (which stop near 3 kHz here) cannot.
+    pub click: f32,
     pub level: f32,
 }
 
@@ -81,6 +85,10 @@ pub struct HiHat {
     /// Foot 0 (up) .. 1 (down), and the top plate's rigid offset and
     /// velocity (the plate the foot is moving, with its own inertia).
     pedal_target: f32,
+    /// Stick click burst envelope, per sample, and the differencer's
+    /// last sample.
+    click_env: f32,
+    click_prev: f32,
     z: f32,
     vz: f32,
     /// The foot is holding the plate down: the rigid body is a
@@ -106,6 +114,8 @@ impl HiHat {
             w_top: Vec::new(),
             w_bot: Vec::new(),
             pedal_target: 0.0,
+            click_env: 0.0,
+            click_prev: 0.0,
             z: 0.0,
             vz: 0.0,
             latched: false,
@@ -166,15 +176,23 @@ impl HiHat {
     pub fn strike(&mut self, strength: f32) {
         self.top.strike(strength);
         self.bottom.wake();
+        self.click_env = self.p.click * strength;
     }
 
-    /// Foot down (true) or up.
+    /// Foot down (true) or up. Closing is a stroke too: the plates'
+    /// rims meet with their own contact noise — the chick's tick —
+    /// which the pedal's rigid arrival alone (a slow, soft impact
+    /// against the felt) barely makes.
     pub fn pedal(&mut self, down: bool) {
+        let was_up = self.pedal_target == 0.0;
         self.pedal_target = if down {
             self.p.press.clamp(0.0, 1.0)
         } else {
             0.0
         };
+        if down && was_up {
+            self.click_env = self.click_env.max(self.p.click * 0.7);
+        }
         self.top.wake();
         self.bottom.wake();
     }
@@ -255,7 +273,16 @@ impl HiHat {
         self.bottom.push_raw(&f_bot);
         // The bottom plate is shielded by the top one: heard a little
         // less.
-        (self.top.tick(rng) + 0.7 * self.bottom.tick(rng)) * self.p.level
+        let mut out = self.top.tick(rng) + 0.7 * self.bottom.tick(rng);
+        if self.click_env > 1e-4 {
+            // Bright: differenced noise tilts up 6 dB/octave, which is
+            // where a stick on bronze lives.
+            let n = rng.next();
+            out += (n - self.click_prev) * self.click_env * 0.6;
+            self.click_prev = n;
+            self.click_env *= (-1.0 / (0.0015 * SR)).exp();
+        }
+        out * self.p.level
     }
 }
 
@@ -276,7 +303,8 @@ pub fn default_params() -> HiHatParams {
         },
         gap: 0.4,
         press: 1.0,
-        level: 0.5,
+        click: 1.0,
+        level: 1.2,
     }
 }
 
