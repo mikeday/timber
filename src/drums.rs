@@ -58,6 +58,34 @@ pub struct PadParams {
     /// (2–18 Hz of beat at 1.0, scattered per mode) — proportional splits would push
     /// high modes into 20-150 Hz beating, which reads as buzz.
     pub shimmer: f32,
+    /// Mallet: the strike delivered as a half-sine push instead of
+    /// one sample, this many seconds long at middle C and scaling with
+    /// the period (a push longer than a period cancels the
+    /// fundamental — which is why players take harder mallets up the
+    /// instrument). A soft mallet reaches the low modes and not the
+    /// high ones — the difference between a marimba mallet and a click.
+    pub attack: f32,
+    /// Handclap: the burst fired this many times ~11 ms apart, the
+    /// last with the full `noise_decay` — the 808's picture of several
+    /// hands, unimproved since 1980.
+    pub claps: u8,
+    /// Vibraphone tremolo depth: the rotating vanes, ~5.5 Hz.
+    pub tremolo: f32,
+    /// Bloom aim: 0 sends the bloom to the top of the table (a
+    /// cymbal's wash), 1 to the second and third partials (a dome
+    /// pouring its energy into octave and twelfth — the steel pan).
+    pub bloom_lo: f32,
+    /// Sympathetic neighbours: a note also drives, at this level, the
+    /// same object a fifth and a fourth away, slightly detuned, as the
+    /// notes sharing a pan's skirt (or a vibraphone's rail) are driven
+    /// by a strike next door.
+    pub bleed: f32,
+    /// The roll: hits per second and their strength. A drum roll is
+    /// ~14/s at 0.6–0.95; a pan roll is two sticks alternating, softer
+    /// and more even — a pan cannot sustain, so a held note *is* a
+    /// roll, and that shimmer is most of what a steel band sounds like.
+    pub roll_rate: f32,
+    pub roll_strength: f32,
     pub level: f32,
     pub choke: Option<u8>,
 }
@@ -99,6 +127,14 @@ pub struct Pad {
     rattle0: f32,
     wash_y1: f32,
     wash_y2: f32,
+    /// The mallet push in progress: samples left, its length, its
+    /// peak; the clap bursts still to fire and the wait to the next.
+    push_left: u32,
+    push_n: u32,
+    push_amp: f32,
+    clap_left: u8,
+    clap_wait: u32,
+    trem_phase: f32,
     choking: bool,
     refresh: u32,
     rolling: bool,
@@ -134,6 +170,12 @@ impl Pad {
             rattle0: 1.0,
             wash_y1: 0.0,
             wash_y2: 0.0,
+            push_left: 0,
+            push_n: 1,
+            push_amp: 0.0,
+            clap_left: 0,
+            clap_wait: 0,
+            trem_phase: 0.0,
             choking: false,
             refresh: 0,
             rolling: false,
@@ -159,7 +201,17 @@ impl Pad {
             .map(|m| m.gain)
             .sum();
         if sum > 0.0 {
-            self.impulse += strength / sum;
+            let s = strength / sum;
+            let n = (self.p.attack * (261.63 / self.freq_s.max(20.0)) * SR) as u32;
+            if n >= 2 {
+                // Half-sine push with the same total impulse as the
+                // one-sample hit.
+                self.push_n = n;
+                self.push_left = n;
+                self.push_amp = s * std::f32::consts::PI / (2.0 * n as f32);
+            } else {
+                self.impulse += s;
+            }
             if self.p.bloom > 0.0 {
                 self.bloom_pending += self.p.bloom * strength * strength * 2.0 / sum;
                 self.bloom_wait = (self.p.bloom_delay.clamp(0.0, 2.0) * SR) as u32;
@@ -170,6 +222,12 @@ impl Pad {
         self.rattle = self.p.noise * 0.5;
         self.rattle0 = self.rattle.max(1e-9);
         self.rattle_step = (-1.0 / (self.p.noise_decay.max(0.002) * SR)).exp();
+        self.clap_left = self.p.claps.saturating_sub(1);
+        if self.clap_left > 0 {
+            // The pre-claps are short; the last burst gets the tail.
+            self.rattle_step = (-1.0 / (0.008 * SR)).exp();
+            self.clap_wait = (0.011 * SR) as u32;
+        }
         self.choking = false;
         self.refresh = 0;
     }
@@ -254,6 +312,8 @@ impl Pad {
             && self.rattle < 1e-6
             && self.bloom_pending <= 0.0
             && self.bloom_left == 0
+            && self.push_left == 0
+            && self.clap_left == 0
             && self
                 .res
                 .iter()
@@ -275,8 +335,28 @@ impl Pad {
         }
         self.refresh -= 1;
 
-        let x = self.impulse;
+        let mut x = self.impulse;
         self.impulse = 0.0;
+        if self.push_left > 0 {
+            let k = self.push_n - self.push_left;
+            x += self.push_amp * (std::f32::consts::PI * k as f32 / self.push_n as f32).sin();
+            self.push_left -= 1;
+        }
+        if self.clap_left > 0 {
+            if self.clap_wait == 0 {
+                self.clap_left -= 1;
+                self.rattle = self.p.noise * 0.5;
+                self.rattle0 = self.rattle.max(1e-9);
+                self.rattle_step = if self.clap_left == 0 {
+                    (-1.0 / (self.p.noise_decay.max(0.002) * SR)).exp()
+                } else {
+                    (-1.0 / (0.008 * SR)).exp()
+                };
+                self.clap_wait = (0.011 * SR) as u32;
+            } else {
+                self.clap_wait -= 1;
+            }
+        }
         if self.bloom_pending > 0.0 {
             if self.bloom_wait == 0 {
                 let spread = (self.p.bloom_spread.clamp(0.0, 2.0) * SR) as u32;
@@ -306,8 +386,11 @@ impl Pad {
         // tables put the high partials last — so the second impulse
         // lands mostly in the top of the spectrum.
         let inv_n = 1.0 / n.max(1) as f32;
+        let lo = self.p.bloom_lo.clamp(0.0, 1.0);
         let run = |k: usize, r: &mut Resonator| {
-            let w = (k as f32 * inv_n).powi(2);
+            let w_hi = (k as f32 * inv_n).powi(2);
+            let w_lo = if k == 1 || k == 2 { 1.0 } else { 0.0 };
+            let w = w_hi * (1.0 - lo) + w_lo * lo;
             let y = r.b1 * r.y1 - r.b2 * r.y2 + r.g * (x + x_hi * w);
             r.y2 = r.y1;
             r.y1 = y;
@@ -356,19 +439,123 @@ impl Pad {
         if self.p.drive > 0.0 {
             sum = (self.p.drive * sum).tanh() / self.p.drive.tanh();
         }
+        if self.p.tremolo > 0.0 {
+            self.trem_phase += TAU * 5.5 / SR;
+            if self.trem_phase > TAU {
+                self.trem_phase -= TAU;
+            }
+            sum *= 1.0 - self.p.tremolo * 0.5 * (1.0 - self.trem_phase.cos());
+        }
         sum * self.p.level
+    }
+
+    /// Nothing sounding and nothing pending: a voice this pad can be
+    /// reused for another note.
+    fn is_quiet(&self) -> bool {
+        self.rattle < 1e-6
+            && self.push_left == 0
+            && self.clap_left == 0
+            && self.bloom_pending <= 0.0
+            && self.res.iter().all(|r| r.y1.abs() < 1e-5)
     }
 }
 
-/// The kit: one streaming pad per drum, mixed to a single output.
+/// Polyphony for the tuned pads: a note is the pad's parameters at a
+/// pitch, in its own bank.
+struct Voice {
+    pad: usize,
+    freq: f32,
+    p: Pad,
+    born: u64,
+    /// Held under a rolling melody key.
+    rolling: bool,
+    roll_t: f32,
+}
+
+const MAX_VOICES: usize = 12;
+
+/// The kit: one streaming pad per drum, plus a pool of note voices for
+/// the tuned ones, mixed to a single output.
 pub struct Kit {
     pads: Vec<Pad>,
+    voices: Vec<Voice>,
+    clock: u64,
 }
 
 impl Kit {
     pub fn new(params: Vec<PadParams>) -> Self {
         Kit {
             pads: params.into_iter().map(Pad::new).collect(),
+            voices: Vec::new(),
+            clock: 0,
+        }
+    }
+
+    /// Play pad `i` at a pitch: the same note ringing is restruck, else
+    /// a quiet voice is taken, else a new one up to the pool, else the
+    /// oldest is stolen.
+    pub fn strike_note(&mut self, i: usize, freq: f32) {
+        self.note_at(i, freq, 1.0);
+        let bleed = self.pads.get(i).map_or(0.0, |p| p.p.bleed);
+        if bleed > 0.0 {
+            // The neighbours: a fifth up and a fourth down (a pan lays
+            // notes out by fifths), a few cents off, quiet.
+            self.note_at(i, freq * 1.4983 * 1.004, bleed);
+            self.note_at(i, freq / 1.3348 * 0.996, bleed);
+        }
+    }
+
+    fn note_at(&mut self, i: usize, freq: f32, strength: f32) {
+        let Some(src) = self.pads.get(i) else {
+            return;
+        };
+        let params = PadParams { freq, ..src.p };
+        self.clock += 1;
+        let same = self
+            .voices
+            .iter()
+            .position(|v| v.pad == i && (v.freq / freq - 1.0).abs() < 1e-3);
+        let slot = same
+            .or_else(|| self.voices.iter().position(|v| v.p.is_quiet()))
+            .or_else(|| {
+                if self.voices.len() < MAX_VOICES {
+                    None
+                } else {
+                    self.voices
+                        .iter()
+                        .enumerate()
+                        .min_by_key(|(_, v)| v.born)
+                        .map(|(k, _)| k)
+                }
+            });
+        match slot {
+            Some(k) => {
+                let v = &mut self.voices[k];
+                if same != Some(k) {
+                    // A different note or pad: start clean, and at
+                    // pitch rather than gliding from the old one.
+                    v.p.res = [Resonator::default(); 2 * MAX_MODES];
+                    v.p.freq_s = freq;
+                }
+                v.pad = i;
+                v.freq = freq;
+                v.p.p = params;
+                v.p.refresh = 0;
+                v.born = self.clock;
+                v.p.strike(strength);
+            }
+            None => {
+                let mut p = Pad::new(params);
+                p.strike(strength);
+                self.voices.push(Voice {
+                    pad: i,
+                    freq,
+                    p,
+                    born: self.clock,
+                    rolling: false,
+                    roll_t: 0.0,
+                });
+            }
         }
     }
 
@@ -387,6 +574,15 @@ impl Kit {
             }
             pad.p = p;
             pad.refresh = 0;
+        }
+        for v in self.voices.iter_mut().filter(|v| v.pad == i) {
+            let n = p.modes.len().min(MAX_MODES);
+            for k in n..MAX_MODES {
+                v.p.res[k] = Resonator::default();
+                v.p.res[MAX_MODES + k] = Resonator::default();
+            }
+            v.p.p = PadParams { freq: v.freq, ..p };
+            v.p.refresh = 0;
         }
     }
 
@@ -408,9 +604,6 @@ impl Kit {
         self.pads[i].strike(strength);
     }
 
-    /// Hold-to-roll: while on, the pad restrikes itself with humanized
-    /// timing and strength. The initial press's strike is separate, so
-    /// the timer starts a full interval out.
     pub fn mode_levels(&self, i: usize, out: &mut Vec<(f32, f32, f32)>) {
         if let Some(pad) = self.pads.get(i) {
             pad.mode_levels(out);
@@ -424,13 +617,37 @@ impl Kit {
             .unwrap_or((0.0, 0.0, 1500.0))
     }
 
+    /// Hold-to-roll: while on, the pad restrikes itself with humanized
+    /// timing and strength. The initial press's strike is separate, so
+    /// the timer starts a full interval out.
     pub fn set_roll(&mut self, i: usize, on: bool) {
         if let Some(pad) = self.pads.get_mut(i) {
             pad.rolling = on;
             if on {
-                pad.roll_t = 0.06 * SR;
+                pad.roll_t = SR / pad.p.roll_rate.max(1.0);
             }
         }
+    }
+
+    /// Roll a note: on while its melody key is held (the press's own
+    /// strike is separate). Off stops the roll on that pitch.
+    pub fn set_note_roll(&mut self, i: usize, freq: f32, on: bool) {
+        let rate = self.pads.get(i).map_or(14.0, |p| p.p.roll_rate).max(1.0);
+        if let Some(v) = self
+            .voices
+            .iter_mut()
+            .find(|v| v.pad == i && (v.freq / freq - 1.0).abs() < 1e-3)
+        {
+            v.rolling = on;
+            if on {
+                v.roll_t = SR / rate;
+            }
+        }
+    }
+
+    /// Humanized time to the next roll hit: a little late or early.
+    fn roll_interval(rate: f32, rng: &mut Rng) -> f32 {
+        SR / rate.max(1.0) * (0.92 + 0.16 * rng.next().abs())
     }
 
     pub fn tick(&mut self, rng: &mut Rng) -> f32 {
@@ -441,12 +658,27 @@ impl Kit {
             if self.pads[i].rolling {
                 self.pads[i].roll_t -= 1.0;
                 if self.pads[i].roll_t <= 0.0 {
-                    self.strike_with(i, 0.6 + 0.35 * rng.next().abs());
-                    self.pads[i].roll_t = (0.055 + 0.02 * rng.next().abs()) * SR;
+                    let (rate, s) = (self.pads[i].p.roll_rate, self.pads[i].p.roll_strength);
+                    self.strike_with(i, s * (0.85 + 0.3 * rng.next().abs()));
+                    self.pads[i].roll_t = Self::roll_interval(rate, rng);
                 }
             }
         }
-        self.pads.iter_mut().map(|p| p.tick(rng)).sum()
+        // Rolling notes restrike themselves in place — the same voice,
+        // so the ring builds rather than a new voice per hit.
+        for v in self.voices.iter_mut() {
+            if v.rolling {
+                v.roll_t -= 1.0;
+                if v.roll_t <= 0.0 {
+                    let (rate, s) = (v.p.p.roll_rate, v.p.p.roll_strength);
+                    v.p.strike(s * (0.85 + 0.3 * rng.next().abs()));
+                    v.roll_t = Self::roll_interval(rate, rng);
+                }
+            }
+        }
+        let pads: f32 = self.pads.iter_mut().map(|p| p.tick(rng)).sum();
+        let notes: f32 = self.voices.iter_mut().map(|v| v.p.tick(rng)).sum();
+        pads + notes
     }
 }
 
@@ -471,6 +703,13 @@ mod tests {
             bloom_spread: 0.0,
             drive: 0.0,
             shimmer: 0.0,
+            attack: 0.0,
+            claps: 1,
+            tremolo: 0.0,
+            bloom_lo: 0.0,
+            bleed: 0.0,
+            roll_rate: 14.0,
+            roll_strength: 0.75,
             level: 0.8,
             choke: None,
         }
@@ -491,6 +730,13 @@ mod tests {
             bloom_spread: 0.0,
             drive: 0.0,
             shimmer: 0.0,
+            attack: 0.0,
+            claps: 1,
+            tremolo: 0.0,
+            bloom_lo: 0.0,
+            bleed: 0.0,
+            roll_rate: 14.0,
+            roll_strength: 0.75,
             level: 0.8,
             choke: Some(0),
         }
@@ -511,6 +757,13 @@ mod tests {
             bloom_spread: 0.0,
             drive: 0.0,
             shimmer: 0.0,
+            attack: 0.0,
+            claps: 1,
+            tremolo: 0.0,
+            bloom_lo: 0.0,
+            bleed: 0.0,
+            roll_rate: 14.0,
+            roll_strength: 0.75,
             level: 0.4,
             choke: Some(0),
         }
@@ -653,11 +906,12 @@ mod tests {
         let mut kit = Kit::new(vec![bell()]);
         kit.strike(0);
         run(&mut kit, &mut rng, 22050);
-        // Pillow on at t=0.5s.
+        // Hand on at t=0.5s (the desk's muffle floor; a church bell's
+        // hum has a nine-second decay, and a pillow is not enough).
         kit.set_params(
             0,
             PadParams {
-                damp: 0.05,
+                damp: 0.02,
                 ..bell()
             },
         );

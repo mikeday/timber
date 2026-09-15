@@ -111,6 +111,9 @@ enum Msg {
     CymbalPad(usize, cymbal::CymbalParams),
     /// The looper's one button, undo and clear.
     Loop(LoopCmd),
+    /// A modal pad at a pitch (the melody keys), and its roll on/off.
+    Note(usize, f32),
+    NoteRoll(usize, f32, bool),
     /// Hi-hat: stick on the top plate, the pedal, its params.
     HatStrike(f32),
     HatPedal(bool),
@@ -137,6 +140,8 @@ enum Hit {
     Roll(usize, bool),
     Hat(f32),
     Pedal(bool),
+    Note(usize, f32),
+    NoteRoll(usize, f32, bool),
 }
 
 /// Looper settings and its state for display, shared with the audio
@@ -171,6 +176,8 @@ impl Instruments {
             Hit::Roll(i, on) => self.kit.set_roll(i, on),
             Hit::Hat(s) => self.hat.strike(s),
             Hit::Pedal(down) => self.hat.pedal(down),
+            Hit::Note(i, f) => self.kit.strike_note(i, f),
+            Hit::NoteRoll(i, f, on) => self.kit.set_note_roll(i, f, on),
         }
     }
 }
@@ -279,6 +286,8 @@ fn start_audio(
                         Msg::CymbalStrike(i, s) => Some(Hit::Cymbal(i, s)),
                         Msg::HatStrike(s) => Some(Hit::Hat(s)),
                         Msg::HatPedal(down) => Some(Hit::Pedal(down)),
+                        Msg::Note(i, f) => Some(Hit::Note(i, f)),
+                        Msg::NoteRoll(i, f, on) => Some(Hit::NoteRoll(i, f, on)),
                         _ => None,
                     };
                     if let Some(h) = hit {
@@ -293,7 +302,9 @@ fn start_audio(
                         | Msg::MeshStrike(..)
                         | Msg::CymbalStrike(..)
                         | Msg::HatStrike(_)
-                        | Msg::HatPedal(_) => unreachable!(),
+                        | Msg::HatPedal(_)
+                        | Msg::Note(..)
+                        | Msg::NoteRoll(..) => unreachable!(),
                         Msg::HatPad(params) => ins.hat.set_params(params),
                         Msg::Loop(LoopCmd::Toggle) => looper.toggle(clock),
                         Msg::Loop(LoopCmd::Stop) => looper.stop(clock),
@@ -497,6 +508,9 @@ enum ModeSet {
     Gong,
     Hat,
     Snare,
+    Marimba,
+    Vibes,
+    Pan,
     NoiseOnly,
 }
 
@@ -512,6 +526,9 @@ impl ModeSet {
             ModeSet::Gong => modal::GONG,
             ModeSet::Hat => modal::HAT,
             ModeSet::Snare => modal::SNARE,
+            ModeSet::Marimba => modal::MARIMBA,
+            ModeSet::Vibes => modal::VIBES,
+            ModeSet::Pan => modal::PAN,
             ModeSet::NoiseOnly => &[],
         }
     }
@@ -526,6 +543,9 @@ impl ModeSet {
             ModeSet::Gong => "gong (synth)",
             ModeSet::Hat => "hi-hat (synth)",
             ModeSet::Snare => "snare head",
+            ModeSet::Marimba => "marimba bar",
+            ModeSet::Vibes => "vibraphone bar",
+            ModeSet::Pan => "steel pan",
             ModeSet::NoiseOnly => "noise only",
         }
     }
@@ -547,6 +567,13 @@ struct DrumParams {
     bloom_spread: f32,
     drive: f32,
     shimmer: f32,
+    attack: f32,
+    claps: u8,
+    tremolo: f32,
+    bloom_lo: f32,
+    bleed: f32,
+    roll_rate: f32,
+    roll_strength: f32,
     level: f32,
     choke: Option<u8>,
 }
@@ -567,6 +594,13 @@ impl DrumParams {
             bloom_spread: self.bloom_spread,
             drive: self.drive,
             shimmer: self.shimmer,
+            attack: self.attack,
+            claps: self.claps,
+            tremolo: self.tremolo,
+            bloom_lo: self.bloom_lo,
+            bleed: self.bleed,
+            roll_rate: self.roll_rate,
+            roll_strength: self.roll_strength,
             level: self.level,
             choke: self.choke,
         }
@@ -589,6 +623,13 @@ fn default_pads() -> Vec<DrumParams> {
         bloom_spread: 0.0,
         drive: 0.0,
         shimmer: 0.0,
+        attack: 0.0,
+        claps: 1,
+        tremolo: 0.0,
+        bloom_lo: 0.0,
+        bleed: 0.0,
+        roll_rate: 14.0,
+        roll_strength: 0.75,
         level: 0.85,
         choke: None,
     };
@@ -737,6 +778,69 @@ fn default_pads() -> Vec<DrumParams> {
             level: 0.5,
             ..base
         },
+        // The 808's handclap: four bursts of bandpassed noise, the last
+        // with a tail.
+        DrumParams {
+            name: "clap",
+            modes: ModeSet::NoiseOnly,
+            noise: 1.0,
+            noise_decay: 0.1,
+            noise_tone: 0.7,
+            claps: 4,
+            level: 0.5,
+            ..base
+        },
+        // Tuned: `freq` is the pitch of the A key with the melody keys
+        // on (middle C by default); the object carries the tuning.
+        DrumParams {
+            name: "marimba",
+            modes: ModeSet::Marimba,
+            freq: 261.63,
+            attack: 0.004,
+            drive: 0.5,
+            level: 0.9,
+            ..base
+        },
+        DrumParams {
+            name: "vibes",
+            modes: ModeSet::Vibes,
+            freq: 261.63,
+            attack: 0.003,
+            tremolo: 0.5,
+            bleed: 0.08,
+            level: 0.8,
+            ..base
+        },
+        // The pan: a hard note starts sharp and settles (the dome
+        // stiffening), the octave and twelfth bloom in just after, the
+        // neighbours ring along, and the pairs beat.
+        DrumParams {
+            name: "steel pan",
+            modes: ModeSet::Pan,
+            freq: 261.63,
+            glide: 0.02,
+            glide_time: 0.06,
+            // A rubber-tipped stick: near-instant contact. A 1.5 ms
+            // mallet push has its spectral null at 1 kHz — right on
+            // the pan's loudest partial (3.65×), and the twang was
+            // being filtered out by the mallet.
+            attack: 0.0,
+            // The stick on the steel: a 2 kHz-centroid impact the
+            // recordings show in the first 5 ms.
+            noise: 1.0,
+            noise_decay: 0.004,
+            bloom: 0.5,
+            bloom_delay: 0.012,
+            bloom_spread: 0.03,
+            bloom_lo: 1.0,
+            bleed: 0.08,
+            shimmer: 0.25,
+            // Two sticks: soft, even, quick.
+            roll_rate: 15.0,
+            roll_strength: 0.45,
+            level: 0.7,
+            ..base
+        },
     ]
 }
 
@@ -752,7 +856,7 @@ const VOWELS: [(&str, Vowel); 5] = [
 /// one (shift can change the logical key on some layouts — QWERTZ turns
 /// shift+',' into ';' — which would strand roll state). Must stay in
 /// step with default_pads(): asserted at startup.
-const DRUM_KEYS: [egui::Key; 12] = [
+const DRUM_KEYS: [egui::Key; 13] = [
     egui::Key::Num1,
     egui::Key::Num2,
     egui::Key::Num3,
@@ -765,6 +869,9 @@ const DRUM_KEYS: [egui::Key; 12] = [
     egui::Key::Num0,
     egui::Key::Minus,
     egui::Key::Equals,
+    // The spare bottom-row key takes the clap; pads beyond these are
+    // played by clicking, or by the melody keys.
+    egui::Key::Slash,
 ];
 const NPADS: usize = DRUM_KEYS.len();
 /// The physical kit lives on the bottom row: mesh pads, then the
@@ -837,6 +944,11 @@ struct Desk {
     cymbal_sel: usize,
     hat: hihat::HiHatParams,
     pedal_down: bool,
+    /// The home row plays the selected modal pad chromatically.
+    melody: bool,
+    octave: i32,
+    /// Melody keys held with shift: (semitone, pad, freq) rolling.
+    note_rolls: Vec<(usize, usize, f32)>,
     loop_ctl: Arc<LoopCtl>,
     view: Arc<Mutex<ViewData>>,
     view_ctl: Arc<ViewCtl>,
@@ -895,6 +1007,33 @@ impl Desk {
 /// ("rattle decay" ≈ 82 + 48 + 16) without spilling into the next column.
 fn track_width(ui: &egui::Ui) -> f32 {
     (ui.available_width() - 170.0).clamp(40.0, 200.0)
+}
+
+/// The chromatic keyboard for the melody keys: white keys along the
+/// home row from A (C), black keys on the row above.
+fn melody_semitone(key: egui::Key) -> Option<usize> {
+    use egui::Key::*;
+    Some(match key {
+        A => 0,
+        W => 1,
+        S => 2,
+        E => 3,
+        D => 4,
+        F => 5,
+        T => 6,
+        G => 7,
+        Y => 8,
+        H => 9,
+        U => 10,
+        J => 11,
+        K => 12,
+        O => 13,
+        L => 14,
+        P => 15,
+        Semicolon => 16,
+        Quote => 17,
+        _ => return None,
+    })
 }
 
 /// A field on a square, normalized by a decaying running peak. Motion:
@@ -1078,6 +1217,9 @@ impl eframe::App for Desk {
                     self.pedal_down = false;
                     let _ = self.tx.send(Msg::HatPedal(false));
                 }
+                for (_, pad, f) in self.note_rolls.drain(..) {
+                    let _ = self.tx.send(Msg::NoteRoll(pad, f, false));
+                }
                 for k in 0..NPADS {
                     if self.rolling[k] {
                         self.rolling[k] = false;
@@ -1110,6 +1252,22 @@ impl eframe::App for Desk {
                     acts.push((if i.modifiers.shift { 10 } else { 7 }, 0));
                 } else if *pressed && !*repeat && key == egui::Key::Backspace {
                     acts.push((if i.modifiers.shift { 9 } else { 8 }, 0));
+                } else if self.melody
+                    && !*repeat
+                    && let Some(semi) = melody_semitone(key)
+                {
+                    if *pressed {
+                        acts.push((14, semi));
+                        if i.modifiers.shift {
+                            acts.push((17, semi));
+                        }
+                    } else {
+                        acts.push((18, semi));
+                    }
+                } else if self.melody && *pressed && !*repeat && key == egui::Key::OpenBracket {
+                    acts.push((15, 0));
+                } else if self.melody && *pressed && !*repeat && key == egui::Key::CloseBracket {
+                    acts.push((16, 0));
                 } else if let Some(k) = DRUM_KEYS.iter().position(|d| *d == key) {
                     self.drum_down[k] = *pressed;
                     if *pressed && !*repeat {
@@ -1164,6 +1322,33 @@ impl eframe::App for Desk {
                 }
                 13 => {
                     let _ = self.tx.send(Msg::HatPedal(false));
+                }
+                14 => {
+                    // The pad's `freq` is the pitch of the A key.
+                    let base = self.pads[self.pad_sel].freq;
+                    let f = base * 2f32.powf(k as f32 / 12.0 + self.octave as f32);
+                    let _ = self.tx.send(Msg::Note(self.pad_sel, f));
+                }
+                15 => self.octave = (self.octave - 1).max(-3),
+                16 => self.octave = (self.octave + 1).min(3),
+                // Shift+melody key held = roll that note (a pan's
+                // sustain); release stops it.
+                17 => {
+                    let base = self.pads[self.pad_sel].freq;
+                    let f = base * 2f32.powf(k as f32 / 12.0 + self.octave as f32);
+                    self.note_rolls.push((k, self.pad_sel, f));
+                    let _ = self.tx.send(Msg::NoteRoll(self.pad_sel, f, true));
+                }
+                18 => {
+                    let mut kept = Vec::new();
+                    for (semi, pad, f) in self.note_rolls.drain(..) {
+                        if semi == k {
+                            let _ = self.tx.send(Msg::NoteRoll(pad, f, false));
+                        } else {
+                            kept.push((semi, pad, f));
+                        }
+                    }
+                    self.note_rolls = kept;
                 }
                 // Left hand fingers, right hand excites: while the bow
                 // is on the string, a key only changes the fingered
@@ -1337,7 +1522,8 @@ impl eframe::App for Desk {
             ui.small("space — loop: record / close & play / overdub ↔ jam");
             ui.small("shift+space — stop / restart");
             ui.small("backspace — undo last layer (shift: clear)");
-            ui.small("1 2 3 4 5 6 7 8 9 0 - = — modal kit (shift = roll)");
+            ui.small("1 2 3 4 5 6 7 8 9 0 - = / — modal kit (shift = roll)");
+            ui.small("melody keys (when on): home row white, W E T Y U O P black, [ ] octave, shift = roll");
             ui.small("Z X C V B — mesh drums · N M — cymbals (shift = hard hit)");
             ui.small(", — hi-hat (shift = hard) · hold . — pedal down");
             ui.small("A S D F G H J K — pluck (finger, while bowing)");
@@ -1385,6 +1571,9 @@ impl eframe::App for Desk {
                                 ModeSet::Gong,
                                 ModeSet::Hat,
                                 ModeSet::Snare,
+                                ModeSet::Marimba,
+                                ModeSet::Vibes,
+                                ModeSet::Pan,
                                 ModeSet::NoiseOnly,
                             ] {
                                 edited |= ui.selectable_value(&mut p.modes, m, m.name()).changed();
@@ -1410,11 +1599,34 @@ impl eframe::App for Desk {
                     edited |= slider(ui, &mut p.bloom_spread, 0.0..=1.0, false, "bloom spread");
                     edited |= slider(ui, &mut p.drive, 0.0..=6.0, false, "drive");
                     edited |= slider(ui, &mut p.shimmer, 0.0..=1.0, false, "shimmer");
+                    edited |= slider(ui, &mut p.attack, 0.0..=0.02, false, "mallet (attack s)");
+                    edited |= slider(ui, &mut p.tremolo, 0.0..=1.0, false, "tremolo");
+                    edited |= slider(
+                        ui,
+                        &mut p.bloom_lo,
+                        0.0..=1.0,
+                        false,
+                        "bloom aim (top↔harmonics)",
+                    );
+                    edited |= slider(ui, &mut p.bleed, 0.0..=0.6, false, "neighbours (bleed)");
+                    edited |= slider(ui, &mut p.roll_rate, 4.0..=30.0, false, "roll rate (/s)");
+                    edited |= slider(ui, &mut p.roll_strength, 0.1..=1.0, false, "roll strength");
+                    ui.spacing_mut().slider_width = track_width(ui);
+                    edited |= ui
+                        .add(egui::Slider::new(&mut p.claps, 1..=6).text("claps"))
+                        .changed();
                     edited |= slider(ui, &mut p.level, 0.0..=1.0, false, "level");
                     let mut chokes = p.choke.is_some();
                     if ui.checkbox(&mut chokes, "choke group").changed() {
                         p.choke = if chokes { Some(0) } else { None };
                         edited = true;
+                    }
+                    ui.checkbox(&mut self.melody, "melody keys play this pad");
+                    if self.melody {
+                        ui.small(format!(
+                            "A S D F G H J K L ; ' white · W E T Y U O P black · [ ] octave ({:+}) · shift = roll",
+                            self.octave
+                        ));
                     }
                     // Ship changed params to the ringing pad — knob moves
                     // land on sounds already in the air.
@@ -1901,7 +2113,7 @@ fn main() -> eframe::Result {
     let (tx, rx) = channel();
     let freqs = NOTES.iter().map(|(_, f)| *f).collect();
     let pads = default_pads();
-    assert_eq!(pads.len(), NPADS, "DRUM_KEYS and default_pads out of step");
+    assert!(pads.len() >= NPADS, "fewer pads than DRUM_KEYS");
     let mesh_pads = mesh::default_kit();
     assert_eq!(
         mesh_pads.len(),
@@ -1983,6 +2195,9 @@ fn main() -> eframe::Result {
         cymbal_sel: 0,
         hat: hihat::default_params(),
         pedal_down: false,
+        melody: false,
+        octave: 0,
+        note_rolls: Vec::new(),
         loop_ctl,
         view,
         view_ctl,

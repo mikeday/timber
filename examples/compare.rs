@@ -34,6 +34,13 @@ fn pairs() -> Vec<Pair> {
         bloom_spread: 0.0,
         drive: 0.0,
         shimmer: 0.0,
+        attack: 0.0,
+        claps: 1,
+        tremolo: 0.0,
+        bloom_lo: 0.0,
+        bleed: 0.0,
+        roll_rate: 14.0,
+        roll_strength: 0.75,
         level: 1.0,
         choke: None,
     };

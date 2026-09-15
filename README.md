@@ -14,9 +14,13 @@ Models, in `src/`:
   waveguide string with a stick-slip bow, sympathetic coupling and a
   drone mode.
 - `modal` / `drums` — a modal kit: resonator banks with typed-in mode
-  tables (membranes, bell, triangle, and synth cymbal/ride/gong/hi-hat
-  pictures), plus rattle, shimmer, drive and a wash bloom. The
-  "record" drums.
+  tables (membranes, a snare head, a church bell, triangle, marimba
+  and vibraphone bars, a steel pan, and synth cymbal/ride/gong/hi-hat
+  pictures), plus rattle, shimmer, drive, a wash bloom, a mallet
+  attack, tremolo, rolls and the 808 handclap. Tuned pads play
+  polyphonically from the melody keys; the steel pan's table and
+  envelope were fitted to recordings. The "record" drums, and tuned
+  percussion.
 - `mesh` — drums as drums: a 2D finite-difference membrane with a
   Hertz-contact stick, tension pitch-bend, an air cavity and resonant
   head, snare wires, calibrated against recordings (`samples/`). The
@@ -45,14 +49,20 @@ Models, in `src/`:
     cargo run --release --bin desk
 
 The desk is a realtime mixing desk (egui + cpal). Keys: the number
-row `1`–`=` plays the modal kit (shift = roll); the bottom row plays
-the physical kit — `Z X C V B` mesh drums, `N M` cymbals (shift =
-hard hit), `,` the hi-hat with `.` held as the pedal; `A S D F G H J
-K` pluck strings, `Q W E R T` vowels. Hold
-the bow surface to bow, the mouth surface to sing; type phonemes in
-the tract box to speak. `Space` runs the looper (record → play →
-overdub ↔ jam; shift+Space stops), `Backspace` undoes a layer
-(shift+Backspace clears).
+row `1`–`=` plays the modal kit and `/` the clap (shift = roll); the
+bottom row plays the physical kit — `Z X C V B` mesh drums, `N M`
+cymbals (shift = hard hit), `,` the hi-hat with `.` held as the
+pedal. `A S D F G H J K` pluck strings and `Q W E R T` steer vowels —
+or, with "melody keys" on for a modal pad, the home row plays that
+pad chromatically (white keys `A`–`'`, black `W E T Y U O P`, `[ ]`
+octave, shift = roll the note). The marimba, vibes and steel pan have
+no pad key: select them and play the melody keys. Hold the bow
+surface to bow, the mouth surface to sing; type phonemes in the tract
+box to speak. `Space` runs the looper (record → play → overdub ↔ jam;
+shift+Space stops), `Backspace` undoes a layer (shift+Backspace
+clears). Under the panels, the mesh head and cymbal plate are drawn
+live (energy view: the mode shapes, Chladni-style), and the modal
+pad's partials as a ladder lit by what is ringing.
 
 `cargo run --release --bin timber` renders an offline demo to
 `out.wav`. `cargo test --release` runs the tests, most of which
@@ -61,12 +71,15 @@ measure the sound (pitch, decay, formants, wash) rather than the code.
 Diagnostics in `examples/` print what the models do — `compare`
 (modal vs mesh drum), `analyze` (a recording, or `mesh:tomlo`,
 `cymbal:crash`, `hat:open`), `stickprobe`, `washprobe`, `doublehit`,
-`modalprobe`, `hatprobe` and friends — and were how most of the
-calibration decisions were made.
+`modalprobe`, `hatprobe`, `panprobe` and friends — and were how most
+of the calibration decisions were made.
 
 One honest limit: the physical cymbals and hi-hat run on a disc whose
 modes stop near 3 kHz, so they come out darker than the metal they
 model — a crash more like a small gong, a hat without its top. The
 mechanisms (the wash arriving after the hit, the pedal, the choke)
-are right; the synth pictures in the modal kit have the brightness. `samples/` holds CC0 single hits from freesound.org used to
-calibrate the mesh kit; `samples/README` credits them.
+are right; the synth pictures in the modal kit have the brightness.
+
+`samples/` holds CC0 recordings from freesound.org — single drum hits
+used to calibrate the mesh kit, and steel pan notes for the pan pad;
+`samples/README` credits them.

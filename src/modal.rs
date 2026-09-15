@@ -129,43 +129,61 @@ pub const MEMBRANE_CENTER: &[Mode] = &[
 ];
 
 /// Church-bell-ish partials: hum, prime, minor third, fifth, nominal...
-/// Nothing membrane about these ratios — that's the whole point. Swap the
+/// A church bell's profile: hum, prime, tierce, quint, nominal at
+/// 0.5 : 1 : 1.2 : 1.5 : 2 — the minor third in every bell's tone —
+/// then deciem, undeciem, duodeciem and the upper octave. The hum
+/// outlasts everything. Nothing membrane about these ratios — that's the whole point. Swap the
 /// list, swap the object.
 pub const BELL: &[Mode] = &[
     Mode {
         ratio: 0.50,
-        gain: 0.60,
-        decay: 3.5,
+        gain: 0.55,
+        decay: 9.00,
     },
     Mode {
         ratio: 1.00,
         gain: 1.00,
-        decay: 3.0,
+        decay: 5.00,
     },
     Mode {
-        ratio: 1.19,
-        gain: 0.50,
-        decay: 2.2,
+        ratio: 1.20,
+        gain: 0.70,
+        decay: 4.00,
     },
     Mode {
         ratio: 1.50,
-        gain: 0.45,
-        decay: 1.8,
+        gain: 0.40,
+        decay: 3.00,
     },
     Mode {
         ratio: 2.00,
-        gain: 0.40,
-        decay: 1.4,
+        gain: 0.90,
+        decay: 2.50,
     },
     Mode {
-        ratio: 2.74,
+        ratio: 2.50,
         gain: 0.25,
-        decay: 0.9,
+        decay: 1.60,
+    },
+    Mode {
+        ratio: 2.67,
+        gain: 0.20,
+        decay: 1.30,
     },
     Mode {
         ratio: 3.00,
-        gain: 0.15,
-        decay: 0.7,
+        gain: 0.25,
+        decay: 1.10,
+    },
+    Mode {
+        ratio: 4.00,
+        gain: 0.20,
+        decay: 0.70,
+    },
+    Mode {
+        ratio: 5.40,
+        gain: 0.10,
+        decay: 0.40,
     },
 ];
 
@@ -1340,5 +1358,124 @@ pub const SNARE: &[Mode] = &[
         ratio: 4.08,
         gain: 0.12,
         decay: 0.05,
+    },
+];
+
+/// A marimba bar: rosewood, arched underneath by the tuner until the
+/// overtones sit at 1 : 4 : 10 (a bar's natural 1 : 2.76 : 5.4 made
+/// nearly harmonic — the craft in the instrument), over a resonator
+/// tube that favors the fundamental. Wood: short. Wants a mallet
+/// (`attack` a few ms): struck with a click it is a xylophone.
+pub const MARIMBA: &[Mode] = &[
+    Mode {
+        ratio: 1.00,
+        gain: 1.00,
+        decay: 1.10,
+    },
+    Mode {
+        ratio: 4.00,
+        gain: 0.55,
+        decay: 0.35,
+    },
+    Mode {
+        ratio: 10.00,
+        gain: 0.30,
+        decay: 0.12,
+    },
+    Mode {
+        ratio: 2.00,
+        gain: 0.12,
+        decay: 0.50,
+    },
+    Mode {
+        ratio: 17.30,
+        gain: 0.10,
+        decay: 0.05,
+    },
+];
+
+/// A vibraphone bar: the marimba's tuning in aluminium, so it rings
+/// for seconds; the motor-driven vanes over the tubes are the pad's
+/// `tremolo`.
+pub const VIBES: &[Mode] = &[
+    Mode {
+        ratio: 1.00,
+        gain: 1.00,
+        decay: 7.00,
+    },
+    Mode {
+        ratio: 4.00,
+        gain: 0.45,
+        decay: 3.00,
+    },
+    Mode {
+        ratio: 10.00,
+        gain: 0.20,
+        decay: 0.90,
+    },
+    Mode {
+        ratio: 2.00,
+        gain: 0.10,
+        decay: 3.00,
+    },
+    Mode {
+        ratio: 17.30,
+        gain: 0.06,
+        decay: 0.30,
+    },
+];
+
+/// A steel pan note, from a recording (samples/pan_note_*): a shallow
+/// dome hammered into an oil drum until fundamental, octave and
+/// twelfth are harmonic (the tuner's art), then a *strong* inharmonic
+/// partial near 3.65× — the loudest thing in the ring — and a
+/// stretched top. Everything but the fundamental is gone in a third
+/// of a second; the fundamental in under one. The twang
+/// is not in the table: a dome stiffens as it deflects, so a hard
+/// note starts sharp and settles, and the same nonlinearity pours
+/// energy into the octave and twelfth *after* the hit — the pad's
+/// glide and bloom, with the bloom aimed at the harmonics. And a pan's
+/// notes share a skirt: striking one drives its neighbours, which is
+/// the beating and chorus of a steel band (`bleed`).
+pub const PAN: &[Mode] = &[
+    Mode {
+        ratio: 1.00,
+        gain: 1.00,
+        decay: 0.80,
+    },
+    Mode {
+        ratio: 2.00,
+        gain: 0.70,
+        decay: 0.35,
+    },
+    Mode {
+        ratio: 3.00,
+        gain: 0.45,
+        decay: 0.25,
+    },
+    Mode {
+        ratio: 3.65,
+        gain: 1.30,
+        decay: 0.30,
+    },
+    Mode {
+        ratio: 4.50,
+        gain: 0.75,
+        decay: 0.25,
+    },
+    Mode {
+        ratio: 5.25,
+        gain: 0.45,
+        decay: 0.20,
+    },
+    Mode {
+        ratio: 6.50,
+        gain: 0.30,
+        decay: 0.15,
+    },
+    Mode {
+        ratio: 8.00,
+        gain: 0.20,
+        decay: 0.12,
     },
 ];
