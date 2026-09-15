@@ -359,6 +359,8 @@ mod tests {
             air: 0.0,
             reso_freq: 50.0,
             reso_decay: 0.5,
+            two_heads: false,
+            shell: 0.0,
             hardness: 0.7,
             mallet: 1.5,
             level: 1.0,

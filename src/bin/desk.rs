@@ -735,7 +735,6 @@ fn default_pads() -> Vec<DrumParams> {
             name: "crash",
             modes: ModeSet::Cymbal,
             freq: 450.0,
-            damp: 1.0,
             noise: 0.6,
             noise_decay: 0.7,
             noise_tone: 1.0,
@@ -766,7 +765,6 @@ fn default_pads() -> Vec<DrumParams> {
             name: "gong",
             modes: ModeSet::Gong,
             freq: 55.0,
-            damp: 1.0,
             noise: 0.15,
             noise_decay: 0.3,
             noise_tone: 1.0,
@@ -798,6 +796,8 @@ fn default_pads() -> Vec<DrumParams> {
             freq: 261.63,
             attack: 0.004,
             drive: 0.5,
+            // Mallet rolls are softer than stick rolls.
+            roll_strength: 0.5,
             level: 0.9,
             ..base
         },
@@ -808,6 +808,7 @@ fn default_pads() -> Vec<DrumParams> {
             attack: 0.003,
             tremolo: 0.5,
             bleed: 0.08,
+            roll_strength: 0.5,
             level: 0.8,
             ..base
         },
@@ -820,11 +821,9 @@ fn default_pads() -> Vec<DrumParams> {
             freq: 261.63,
             glide: 0.02,
             glide_time: 0.06,
-            // A rubber-tipped stick: near-instant contact. A 1.5 ms
-            // mallet push has its spectral null at 1 kHz — right on
-            // the pan's loudest partial (3.65×), and the twang was
-            // being filtered out by the mallet.
-            attack: 0.0,
+            // A rubber-tipped stick: near-instant contact (a 1.5 ms
+            // mallet push has its spectral null at 1 kHz — right on the
+            // pan's loudest partial), so the base's instant attack.
             // The stick on the steel: a 2 kHz-centroid impact the
             // recordings show in the first 5 ms.
             noise: 1.0,
@@ -1658,7 +1657,7 @@ impl eframe::App for Desk {
                     let mut edited = false;
                     ui.label(format!("editing: {name}"));
                     edited |= slider(ui, &mut m.freq, 30.0..=400.0, true, "freq");
-                    edited |= slider(ui, &mut m.decay, 0.05..=3.0, true, "decay");
+                    edited |= slider(ui, &mut m.decay, 0.02..=3.0, true, "decay");
                     edited |= slider(ui, &mut m.hf_damp, 0.0..=0.95, false, "overtone damp");
                     edited |= slider(ui, &mut m.tension, 0.0..=80.0, false, "tension");
                     edited |= slider(ui, &mut m.strike_pos, 0.0..=1.0, false, "strike pos");
@@ -1668,6 +1667,10 @@ impl eframe::App for Desk {
                     edited |= slider(ui, &mut m.air, 0.0..=1.5, false, "shell air");
                     edited |= slider(ui, &mut m.reso_freq, 25.0..=300.0, true, "reso head");
                     edited |= slider(ui, &mut m.reso_decay, 0.05..=3.0, true, "reso decay");
+                    edited |= ui
+                        .checkbox(&mut m.two_heads, "two heads (full resonant membrane)")
+                        .changed();
+                    edited |= slider(ui, &mut m.shell, 0.0..=0.3, false, "shell coupling");
                     edited |= slider(ui, &mut m.hardness, 0.0..=1.0, false, "stick hardness");
                     edited |= slider(ui, &mut m.mallet, 0.8..=5.0, false, "mallet size");
                     edited |= slider(ui, &mut m.level, 0.0..=4.0, false, "level");

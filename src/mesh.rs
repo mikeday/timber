@@ -97,6 +97,28 @@ const J0_MEAN_SQ: f32 = 0.27;
 /// (0.432·q + x):
 ///   q̈ = −(ω_b² + 1.6·0.432·ka) q − 1.6·ka·x
 ///   ẍ = −(kr + ka) x − 0.432·ka·q
+/// Two full heads: both (0,1) modes see the air through the same
+/// shape, so the coupling is symmetric — M = [[ω_b² + c, c], [c,
+/// ω_r² + c]] with c = (0.432²/0.27)·ka. Given the pitches the pair
+/// should *play* (the eigenvalues), the bare springs are recovered by
+/// solving the quadratic backwards; if the two targets sit closer
+/// than the air can split them, they are set to the closest pair the
+/// coupling allows. Returns (ω_b², ω_r²) bare.
+fn bare_springs(target_b: f32, target_r: f32, ka: f32) -> (f32, f32) {
+    let c = J0_MEAN * J0_MEAN / J0_MEAN_SQ * ka;
+    let sum = target_b + target_r;
+    let disc = (0.25 * (target_b - target_r).powi(2) - c * c)
+        .max(0.0)
+        .sqrt();
+    let (lo, hi) = (0.5 * sum - disc, 0.5 * sum + disc);
+    let (a, b) = if target_b <= target_r {
+        (lo, hi)
+    } else {
+        (hi, lo)
+    };
+    ((a - c).max(0.05 * target_b), (b - c).max(0.05 * target_r))
+}
+
 /// Returns the eigenvalues (ω²) of the batter-dominant and the
 /// resonant-head-dominant modes.
 fn coupled_omega2(wb2: f32, ka: f32, kr: f32) -> (f32, f32) {
@@ -152,6 +174,19 @@ pub struct MeshParams {
     /// Resonant head fundamental, Hz, and its decay, seconds.
     pub reso_freq: f32,
     pub reso_decay: f32,
+    /// The resonant head as a *full* second membrane (its own mesh,
+    /// its own mode series) rather than one lumped mode. Every batter
+    /// mode then splits into a pair through the air — the interleaved
+    /// second series the recordings show, and the "doubled" fullness
+    /// of a drum with a shell. Twice the cost of a head.
+    pub two_heads: bool,
+    /// Shell coupling (two_heads): the heads share a rim on one shell,
+    /// and a shell flexes — a spring between the two heads' rim cells.
+    /// The air couples only the round modes (a dipole has no mean
+    /// displacement to push air with); the shell couples every mode
+    /// with its twin, which is where the recordings' interleaved
+    /// series at 1.2–1.4× comes from.
+    pub shell: f32,
     /// Stick hardness, 0 (felt beater) .. 1 (wood tip): contact
     /// stiffness, hence contact time, hence brightness.
     pub hardness: f32,
@@ -169,6 +204,8 @@ pub struct Mesh {
     mask: Vec<bool>,
     /// Active cell indices (inside the disc), for a tight update loop.
     cells: Vec<usize>,
+    /// Cells on the rim (a neighbour outside the disc): the shell.
+    rim: Vec<usize>,
     lam2: f32,
     s0: f32,
     s1: f32,
@@ -189,6 +226,15 @@ pub struct Mesh {
     reso: f32,
     reso_prev: f32,
     reso_k: f32,
+    /// The full resonant head (two_heads): field, its Courant number
+    /// and losses, and its mean-square displacement for the sleep test.
+    r: Vec<f32>,
+    r_prev: Vec<f32>,
+    r_next: Vec<f32>,
+    lam2_r: f32,
+    s0_r: f32,
+    s1_r: f32,
+    r_e: f32,
     /// Click burst envelope, set by the strike, decaying per step.
     click_env: f32,
     /// One-pole lowpass state for the click: felt is dull, wood bright.
@@ -206,6 +252,11 @@ impl Mesh {
     pub fn new(p: MeshParams) -> Self {
         let Disc { w, mask, cells, .. } = Disc::new(R, 1, 0.0);
         debug_assert_eq!(w, W);
+        let rim = cells
+            .iter()
+            .copied()
+            .filter(|&i| [i - 1, i + 1, i - W, i + W].iter().any(|&n| !mask[n]))
+            .collect();
         let mut m = Mesh {
             p,
             u: vec![0.0; W * W],
@@ -213,6 +264,7 @@ impl Mesh {
             u_next: vec![0.0; W * W],
             mask,
             cells,
+            rim,
             lam2: 0.0,
             s0: 0.0,
             s1: 0.0,
@@ -227,6 +279,13 @@ impl Mesh {
             reso: 0.0,
             reso_prev: 0.0,
             reso_k: 0.0,
+            r: vec![0.0; W * W],
+            r_prev: vec![0.0; W * W],
+            r_next: vec![0.0; W * W],
+            lam2_r: 0.0,
+            s0_r: 0.0,
+            s1_r: 0.0,
+            r_e: 0.0,
             click_env: 0.0,
             click_lp: 0.0,
             patch: Vec::new(),
@@ -254,7 +313,21 @@ impl Mesh {
         self.lam2 = target.min(LAM2_MAX);
         let wr2 = (std::f32::consts::TAU * p.reso_freq.max(10.0) / SR_INT).powi(2);
         self.reso_k = wr2;
-        if p.air > 0.0 {
+        // The second head's own Courant number from its pitch (the
+        // same disc, so the same formula), and its losses.
+        let lam_r = p.reso_freq.max(10.0) * std::f32::consts::TAU * R_EFF / (2.405 * SR_INT);
+        let target_r = lam_r * lam_r;
+        self.lam2_r = target_r.min(LAM2_MAX);
+        if p.two_heads && p.air > 0.0 {
+            // Both bare springs from the played pair, ka following the
+            // batter's bare c² as it converges.
+            for _ in 0..4 {
+                let ka = p.air * self.lam2 * K1;
+                let (wb2, wr2b) = bare_springs(target * K1, target_r * K1, ka);
+                self.lam2 = (wb2 / K1).min(LAM2_MAX);
+                self.lam2_r = (wr2b / K1).min(LAM2_MAX);
+            }
+        } else if p.air > 0.0 {
             for _ in 0..4 {
                 let kr = self.reso_k;
                 let (mut lo, mut hi) = (0.05 * target, target);
@@ -294,6 +367,18 @@ impl Mesh {
         // on the one-step lap − lap_prev, so per unit of u_t it is
         // worth half as much.
         self.s1 = (2.0 * rate * h / K1).min(S1_MAX);
+        // The shell spring stiffens both heads at the rim, which the
+        // air compensation doesn't see: measured, shell 0.06 lifted a
+        // 114 Hz tom to 120. Pull both Courant numbers back by the
+        // matching factor.
+        if p.two_heads && p.shell > 0.0 {
+            let k = 1.0 / (1.0 + 1.7 * p.shell.max(0.0));
+            self.lam2 *= k;
+            self.lam2_r *= k;
+        }
+        let rate_r = 1.0 / (p.reso_decay.max(0.01) * SR_INT);
+        self.s0_r = rate_r * (1.0 - h);
+        self.s1_r = (2.0 * rate_r * h / K1).min(S1_MAX);
         self.build_patch();
     }
 
@@ -357,11 +442,17 @@ impl Mesh {
             .step(self.under_stick(), self.p.hardness, self.patch_mass);
         // Air spring: cavity pressure from the batter's mean inward
         // displacement plus the resonant head's, pushing both back.
+        let two = self.p.two_heads && self.p.air > 0.0;
         let air = if self.p.air > 0.0 {
-            let mean_u =
-                self.cells.iter().map(|&i| self.u[i]).sum::<f32>() / self.cells.len() as f32;
+            let n = self.cells.len() as f32;
+            let mean_u = self.cells.iter().map(|&i| self.u[i]).sum::<f32>() / n;
+            let other = if two {
+                self.cells.iter().map(|&i| self.r[i]).sum::<f32>() / n
+            } else {
+                self.reso
+            };
             let ka = self.p.air * self.lam2 * K1;
-            ka * (mean_u + self.reso)
+            ka * (mean_u + other)
         } else {
             0.0
         };
@@ -380,12 +471,53 @@ impl Mesh {
             kinetic += (un - up[idx]) * (un - up[idx]);
             mono += un - u[idx];
         }
+        // The shell: rim cells of the two heads pulled toward each
+        // other. Applied to both after their own updates.
+        let shell = if two { self.p.shell.max(0.0) } else { 0.0 };
+        if shell > 0.0 {
+            for &idx in &self.rim {
+                let d = self.u[idx] - self.r[idx];
+                self.u_next[idx] -= shell * d / (1.0 + s0);
+            }
+        }
         let mono = mono / self.cells.len() as f32;
         // The resonant head: a lumped mode driven by the same pressure
         // (its whole area, its whole mass — per unit mass the same
         // push as one batter cell).
         let mut reso_v = 0.0;
-        if self.p.air > 0.0 {
+        if two {
+            // The second head: the same wave equation under the same
+            // air pressure, no stick, no tension (it is not struck).
+            let (lam2_r, s0_r, s1_r) = (self.lam2_r, self.s0_r, self.s1_r);
+            let (mut mono_r, mut e_r) = (0.0f32, 0.0f32);
+            for &idx in &self.cells {
+                let r = &self.r;
+                let rp = &self.r_prev;
+                let lap = r[idx - 1] + r[idx + 1] + r[idx - W] + r[idx + W] - 4.0 * r[idx];
+                let lapp = rp[idx - 1] + rp[idx + 1] + rp[idx - W] + rp[idx + W] - 4.0 * rp[idx];
+                let rn =
+                    (2.0 * r[idx] - (1.0 - s0_r) * rp[idx] + lam2_r * lap + s1_r * (lap - lapp)
+                        - air)
+                        / (1.0 + s0_r);
+                self.r_next[idx] = rn;
+                mono_r += rn - r[idx];
+                e_r += rn * rn;
+            }
+            if shell > 0.0 {
+                for &idx in &self.rim {
+                    let d = self.u[idx] - self.r[idx];
+                    self.r_next[idx] += shell * d / (1.0 + s0_r);
+                }
+            }
+            let n = self.cells.len() as f32;
+            self.r_e = e_r / n;
+            // Radiates from underneath, shielded by the shell: heard at
+            // 0.45 of the batter's monopole weight — the recorded rack
+            // tom has its partner mode ~10 dB under the fundamental.
+            reso_v = 2.0 * 0.45 * mono_r / n / 0.6;
+            std::mem::swap(&mut self.r_prev, &mut self.r);
+            std::mem::swap(&mut self.r, &mut self.r_next);
+        } else if self.p.air > 0.0 {
             let kr = self.reso_k;
             let sr = 1.0 / (self.p.reso_decay.max(0.01) * SR_INT);
             let xn =
@@ -479,7 +611,7 @@ impl Mesh {
         if self.phase == 0 {
             self.out_a = self.out_b;
             self.out_b = self.step(rng);
-            if self.energy < 1e-9 && self.out_b.abs() < 1e-5 {
+            if self.energy < 1e-9 && self.r_e < 1e-9 && self.out_b.abs() < 1e-5 {
                 self.quiet += DECIM as u32;
             } else {
                 self.quiet = 0;
@@ -516,9 +648,20 @@ pub fn default_kit() -> Vec<(&'static str, MeshParams)> {
         air: 0.0,
         reso_freq: 100.0,
         reso_decay: 0.4,
+        two_heads: false,
+        shell: 0.0,
         hardness: 0.7,
         mallet: 1.5,
         level: 0.6,
+    };
+    let tom = MeshParams {
+        hf_damp: 0.0,
+        strike_pos: 0.4,
+        click: 0.15,
+        two_heads: true,
+        shell: 0.06,
+        hardness: 0.9,
+        ..base
     };
     vec![
         // 18" jazz kick: 46 Hz, dead in 70 ms, felt beater, a
@@ -560,23 +703,23 @@ pub fn default_kit() -> Vec<(&'static str, MeshParams)> {
                 ..base
             },
         ),
+        // The toms: what the recordings taught. Two heads on a shell,
+        // a wood tip toward the rim, overtones ringing as long as the
+        // fundamental (overtone damp 0), the resonant head outlasting
+        // the batter. (A standard kit is two rack toms and a floor tom;
+        // jazz kits often one of each, rock kits sprawl to four or more.)
         // 12" rack tom: 114 Hz, τ 0.32 s, +12% bend, a second head's
-        // mode 10–15% above the fundamental. (A standard kit is two
-        // rack toms and a floor tom; jazz kits often one of each,
-        // rock kits sprawl to four or more.)
+        // mode 10–15% above the fundamental.
         (
             "tom hi",
             MeshParams {
                 freq: 114.0,
-                decay: 0.22,
+                decay: 0.15,
                 tension: 8.0,
-                air: 0.06,
+                air: 0.1,
                 reso_freq: 130.0,
-                reso_decay: 0.2,
-                hardness: 0.9,
-                click: 0.15,
-                strike_pos: 0.4,
-                ..base
+                reso_decay: 0.35,
+                ..tom
             },
         ),
         // 14" floor tom, between the two recorded ones: 95 Hz.
@@ -584,12 +727,12 @@ pub fn default_kit() -> Vec<(&'static str, MeshParams)> {
             "tom",
             MeshParams {
                 freq: 95.0,
-                decay: 0.4,
+                decay: 0.2,
                 tension: 10.0,
-                air: 0.1,
+                air: 0.12,
                 reso_freq: 116.0,
-                reso_decay: 0.22,
-                ..base
+                reso_decay: 0.4,
+                ..tom
             },
         ),
         // 16" floor tom: 80 Hz, τ 0.5 s, +20% bend, (1,1) at −15 dB.
@@ -597,15 +740,12 @@ pub fn default_kit() -> Vec<(&'static str, MeshParams)> {
             "tom lo",
             MeshParams {
                 freq: 80.0,
-                decay: 0.3,
+                decay: 0.25,
                 tension: 12.0,
-                air: 0.12,
+                air: 0.14,
                 reso_freq: 100.0,
-                reso_decay: 0.25,
-                hardness: 0.9,
-                click: 0.15,
-                strike_pos: 0.4,
-                ..base
+                reso_decay: 0.45,
+                ..tom
             },
         ),
     ]
@@ -658,6 +798,8 @@ mod tests {
             air: 0.0,
             reso_freq: 50.0,
             reso_decay: 0.5,
+            two_heads: false,
+            shell: 0.0,
             hardness: 0.7,
             mallet: 1.5,
             level: 1.0,
