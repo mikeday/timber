@@ -484,7 +484,9 @@ impl Mesh {
         // The resonant head: a lumped mode driven by the same pressure
         // (its whole area, its whole mass — per unit mass the same
         // push as one batter cell).
-        let mut reso_v = 0.0;
+        // What the resonant head contributes to the pickup, already
+        // weighted.
+        let mut reso_out = 0.0;
         if two {
             // The second head: the same wave equation under the same
             // air pressure, no stick, no tension (it is not struck).
@@ -514,7 +516,7 @@ impl Mesh {
             // Radiates from underneath, shielded by the shell: heard at
             // 0.45 of the batter's monopole weight — the recorded rack
             // tom has its partner mode ~10 dB under the fundamental.
-            reso_v = 2.0 * 0.45 * mono_r / n / 0.6;
+            reso_out = 0.45 * 2.0 * mono_r / n;
             std::mem::swap(&mut self.r_prev, &mut self.r);
             std::mem::swap(&mut self.r, &mut self.r_next);
         } else if self.p.air > 0.0 {
@@ -522,7 +524,9 @@ impl Mesh {
             let sr = 1.0 / (self.p.reso_decay.max(0.01) * SR_INT);
             let xn =
                 (2.0 * self.reso - (1.0 - sr) * self.reso_prev - kr * self.reso - air) / (1.0 + sr);
-            reso_v = xn - self.reso;
+            // The lumped head: on a recorded tom its mode sits −11..−16
+            // dB under the batter's, on a kick it is most of the tail.
+            reso_out = 0.6 * (xn - self.reso);
             self.reso_prev = self.reso;
             self.reso = xn;
         }
@@ -564,10 +568,7 @@ impl Mesh {
         // a tom struck alike are alike in level.
         let pick = (R + 1) * W + (R + 1) + R / 3;
         let local = self.u[pick] - self.u_prev[pick];
-        // The resonant head radiates too; on a recorded tom its mode
-        // sits −11..−16 dB under the batter's, on a kick it is most
-        // of the tail.
-        let v = (2.0 * mono + 0.6 * local + 0.6 * reso_v) / self.omega_k() * 0.8;
+        let v = (2.0 * mono + 0.6 * local + reso_out) / self.omega_k() * 0.8;
 
         // Snare wires: noise gated by how hard the head is moving,
         // with a knee — below a certain swing the wires stay pressed

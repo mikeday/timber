@@ -335,7 +335,8 @@ impl Plate {
                 + s1 * (lap[idx] - lapp[idx])
                 + nl)
                 / (1.0 + s0);
-            blown |= !(un.abs() < BLOWUP);
+            // Written to catch NaN as well as a runaway.
+            blown |= !un.is_finite() || un.abs() >= BLOWUP;
             self.u_next[idx] = un;
         }
         // Energy after the update (kinetic + bending + tension, in

@@ -40,7 +40,7 @@ fn main() {
         };
         // Octave guard: for a periodic signal ac(2T) ≈ ac(T), so take
         // the smallest lag close to the maximum, not the global argmax.
-        let max = (40..=420).map(|l| ac(l)).fold(f32::MIN, f32::max);
+        let max = (40..=420).map(&ac).fold(f32::MIN, f32::max);
         let best = (40..=420).find(|&l| ac(l) > 0.9 * max).unwrap();
         println!("  locked at ~{:.0} Hz", SR / best as f32);
     }

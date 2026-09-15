@@ -204,6 +204,7 @@ struct PlayVoice {
     dying: bool,
 }
 
+#[allow(clippy::too_many_arguments)] // one call site; every argument is a distinct shared handle
 fn start_audio(
     mixer: Arc<Mixer>,
     ctl: Arc<stream::Ctl>,
@@ -373,13 +374,13 @@ fn start_audio(
                         click_ph = 0.0;
                         click_f = if one { 2000.0 } else { 1400.0 };
                     }
-                    if clock % 256 == 0 {
+                    if clock.is_multiple_of(256) {
                         loop_ctl.state.store(looper.state() as usize, Relaxed);
                         loop_ctl.layers.store(looper.layers(), Relaxed);
                         loop_ctl.pos.set(looper.position(clock));
                         loop_ctl.len.set(looper.len_secs());
                     }
-                    if view_ctl.energy.load(Relaxed) && clock % 8 == 0 {
+                    if view_ctl.energy.load(Relaxed) && clock.is_multiple_of(8) {
                         if let Some(u) = ins.heads.surface(view_ctl.mesh.load(Relaxed)) {
                             for (a, v) in acc_mesh.iter_mut().zip(u) {
                                 *a += v * v;
@@ -1108,8 +1109,8 @@ impl Desk {
                 }
             }
             Bank::Physical => {
-                for k in 0..5 {
-                    s[k] = Slot::Mesh(k);
+                for (k, slot) in s.iter_mut().enumerate().take(5) {
+                    *slot = Slot::Mesh(k);
                 }
                 let cym = |name: &str| {
                     self.cymbal_pads
@@ -1500,8 +1501,8 @@ impl eframe::App for Desk {
             // Shift + a held modal pad key = roll; a plain press stays a
             // clean single hit.
             let slots = self.slots();
-            for k in 0..NROW {
-                let want = match slots[k] {
+            for (k, slot) in slots.iter().enumerate() {
+                let want = match *slot {
                     Slot::Pad(p) if self.row_down[k] && i.modifiers.shift => Some(p),
                     _ => None,
                 };

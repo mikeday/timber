@@ -96,10 +96,12 @@ pub struct HiHat {
     /// pressed onto a Hertz contact bounces forever).
     latched: bool,
     /// Per-mode damping of each plate from the contacts touching this
-    /// step (the diagonal of the point dampers projected on the modes;
-    /// scratch, rebuilt per sample).
+    /// step (the diagonal of the point dampers projected on the modes),
+    /// and the per-mode contact forces; scratch, rebuilt per sample.
     d_top: Vec<f32>,
     d_bot: Vec<f32>,
+    f_top: Vec<f32>,
+    f_bot: Vec<f32>,
 }
 
 impl HiHat {
@@ -121,6 +123,8 @@ impl HiHat {
             latched: false,
             d_top: Vec::new(),
             d_bot: Vec::new(),
+            f_top: Vec::new(),
+            f_bot: Vec::new(),
         };
         h.contacts();
         h
@@ -162,6 +166,8 @@ impl HiHat {
         let n = self.w_top[0].len();
         self.d_top = vec![0.0; n];
         self.d_bot = vec![0.0; n];
+        self.f_top = vec![0.0; n];
+        self.f_bot = vec![0.0; n];
     }
 
     pub fn set_params(&mut self, p: HiHatParams) {
@@ -239,10 +245,11 @@ impl HiHat {
         // Contacts: where the plates meet, a spring and a damper — and,
         // while the foot holds them there, the felt's damping on each
         // touching point (implicit; see cymbal.rs).
-        let mut f_top = vec![0.0f32; self.w_top[0].len()];
-        let mut f_bot = vec![0.0f32; self.w_bot[0].len()];
-        self.d_top.iter_mut().for_each(|d| *d = 0.0);
-        self.d_bot.iter_mut().for_each(|d| *d = 0.0);
+        let mut f_top = std::mem::take(&mut self.f_top);
+        let mut f_bot = std::mem::take(&mut self.f_bot);
+        for v in [&mut f_top, &mut f_bot, &mut self.d_top, &mut self.d_bot] {
+            v.iter_mut().for_each(|x| *x = 0.0);
+        }
         for k in 0..CONTACTS {
             let sep = offset + self.top.displacement(&self.w_top[k])
                 - self.bottom.displacement(&self.w_bot[k]);
@@ -271,6 +278,8 @@ impl HiHat {
         self.bottom.damp_raw(&self.d_bot);
         self.top.push_raw(&f_top);
         self.bottom.push_raw(&f_bot);
+        self.f_top = f_top;
+        self.f_bot = f_bot;
         // The bottom plate is shielded by the top one: heard a little
         // less.
         let mut out = self.top.tick(rng) + 0.7 * self.bottom.tick(rng);

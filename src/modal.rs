@@ -969,7 +969,7 @@ pub const GONG: &[Mode] = &[
     Mode {
         ratio: 27.84,
         gain: 0.52,
-        decay: 3.14,
+        decay: 3.15,
     },
     Mode {
         ratio: 27.31,

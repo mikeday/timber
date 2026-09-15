@@ -40,6 +40,10 @@ pub fn measured_freq(buf: &[f32], approx_freq: f32) -> f32 {
 pub struct Rng(pub u32);
 
 impl Rng {
+    /// The next sample of noise in −1..1. (Named like an iterator's
+    /// `next` on purpose — it reads as one at every call site — but it
+    /// is not one: it never ends.)
+    #[allow(clippy::should_implement_trait)]
     pub fn next(&mut self) -> f32 {
         self.0 ^= self.0 << 13;
         self.0 ^= self.0 >> 17;

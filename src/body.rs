@@ -202,16 +202,6 @@ impl Body {
 mod tests {
     use super::*;
 
-    fn energy_near(buf: &[f32], f: f32) -> f32 {
-        let w = TAU * f / SR;
-        let (mut re, mut im) = (0.0f32, 0.0f32);
-        for (n, s) in buf.iter().enumerate() {
-            re += s * (w * n as f32).cos();
-            im += s * (w * n as f32).sin();
-        }
-        (re * re + im * im).sqrt().max(1e-9)
-    }
-
     /// Steady-state gain at frequency f: drive with a sine, skip the
     /// transient, read the output level.
     fn response_at(modes: &[BodyMode], f: f32) -> f32 {

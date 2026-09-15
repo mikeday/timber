@@ -245,8 +245,8 @@ impl<E: Clone> Looper<E> {
         }
         let beat = 4 * self.sixteenth();
         let t = now - self.origin;
-        if t % beat == 0 {
-            Some(t % (4 * beat) == 0)
+        if t.is_multiple_of(beat) {
+            Some(t.is_multiple_of(4 * beat))
         } else {
             None
         }

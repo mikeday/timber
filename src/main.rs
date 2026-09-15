@@ -25,7 +25,6 @@ fn main() {
         noise_decay: 0.004,
         drive: 1.8, // membrane nonlinearity: harmonics carry the weight
         level: 0.95,
-        ..Default::default()
     };
     let tom = |freq| Hit {
         freq,
