@@ -174,6 +174,40 @@ impl Pad {
         self.refresh = 0;
     }
 
+    /// For the mode ladder: every sounding mode as (frequency Hz,
+    /// table gain, live amplitude), primary bank then shimmer partners.
+    /// The amplitude is the resonator's envelope, recovered from its
+    /// two states and pole angle — not |y|, which ripples at 2f.
+    pub fn mode_levels(&self, out: &mut Vec<(f32, f32, f32)>) {
+        out.clear();
+        let fm = 1.0 + self.p.glide * self.glide_env;
+        let n = self.p.modes.len().min(MAX_MODES);
+        let banks: &[(usize, f32)] = if self.collapsed {
+            &[(0, 0.0)]
+        } else {
+            &[(0, -1.0), (MAX_MODES, 1.0)]
+        };
+        for &(base, side) in banks {
+            for (k, m) in self.p.modes.iter().take(n).enumerate() {
+                let r = &self.res[base + k];
+                let f = self.freq_s * m.ratio * fm + side * self.shimmer_s * 4.0;
+                let rr = r.b2.max(1e-9).sqrt();
+                let cos_t = (r.b1 / (2.0 * rr)).clamp(-1.0, 1.0);
+                let sin2 = (1.0 - cos_t * cos_t).max(1e-6);
+                let a2 = (r.y1 * r.y1 + r.y2 * r.y2 - 2.0 * r.y1 * r.y2 * cos_t) / sin2;
+                out.push((f, m.gain, a2.max(0.0).sqrt()));
+            }
+        }
+    }
+
+    /// For the ladder: the noise burst right now as (level 0..1 of a
+    /// full-strength burst, tone, center Hz of the wash's resonance).
+    pub fn noise_view(&self) -> (f32, f32, f32) {
+        let frac = (self.rattle / self.rattle0).min(1.0);
+        let fc = 1500.0 + 5500.0 * frac.sqrt();
+        (2.0 * self.rattle, self.p.noise_tone.clamp(0.0, 1.0), fc)
+    }
+
     fn refresh_coeffs(&mut self) {
         let fm = 1.0 + self.p.glide * self.glide_env;
         // Shimmer: constant-Hz split (proportional splits push high
@@ -377,6 +411,19 @@ impl Kit {
     /// Hold-to-roll: while on, the pad restrikes itself with humanized
     /// timing and strength. The initial press's strike is separate, so
     /// the timer starts a full interval out.
+    pub fn mode_levels(&self, i: usize, out: &mut Vec<(f32, f32, f32)>) {
+        if let Some(pad) = self.pads.get(i) {
+            pad.mode_levels(out);
+        }
+    }
+
+    pub fn noise_view(&self, i: usize) -> (f32, f32, f32) {
+        self.pads
+            .get(i)
+            .map(|p| p.noise_view())
+            .unwrap_or((0.0, 0.0, 1500.0))
+    }
+
     pub fn set_roll(&mut self, i: usize, on: bool) {
         if let Some(pad) = self.pads.get_mut(i) {
             pad.rolling = on;

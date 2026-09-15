@@ -496,6 +496,23 @@ impl Cymbal {
         self.quiet = 0;
     }
 
+    /// The plate right now, Σ φ_k q_k on the W×W grid.
+    pub fn surface(&self, out: &mut [f32]) {
+        out.iter_mut().for_each(|x| *x = 0.0);
+        for (f, &q) in self.modes.phi.iter().zip(&self.q) {
+            if q.abs() < 1e-9 {
+                continue;
+            }
+            for &idx in &self.modes.disc.cells {
+                out[idx] += f[idx] * q;
+            }
+        }
+    }
+
+    pub fn width() -> usize {
+        W
+    }
+
     /// A stand's felt: extra loss on the modes below `cut_hz`, per
     /// call, full at DC and tapering to nothing at the cut. Applied
     /// to the state directly so it needs no coefficient change.
@@ -700,6 +717,11 @@ impl Kit {
     pub fn strike(&mut self, i: usize, strength: f32) {
         if let Some(m) = self.pads.get_mut(i) {
             m.strike(strength);
+        }
+    }
+    pub fn surface(&self, i: usize, out: &mut [f32]) {
+        if let Some(m) = self.pads.get(i) {
+            m.surface(out);
         }
     }
     pub fn tick(&mut self, rng: &mut Rng) -> f32 {

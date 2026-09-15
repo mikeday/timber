@@ -327,6 +327,15 @@ impl Mesh {
     /// so the swing it produces is unit-order at any pitch — a fixed
     /// kick swings a low head enormously (displacement ~ v/ω), which
     /// floods the tension feedback.
+    /// The head right now, as a W×W field (border included).
+    pub fn surface(&self) -> &[f32] {
+        &self.u
+    }
+
+    pub fn width() -> usize {
+        W
+    }
+
     pub fn strike(&mut self, strength: f32) {
         self.stick
             .throw(self.under_stick(), strength * self.omega_k() * STICK_V);
@@ -622,6 +631,9 @@ impl Kit {
         if let Some(m) = self.pads.get_mut(i) {
             m.strike(strength);
         }
+    }
+    pub fn surface(&self, i: usize) -> Option<&[f32]> {
+        self.pads.get(i).map(|m| m.surface())
     }
     pub fn tick(&mut self, rng: &mut Rng) -> f32 {
         self.pads.iter_mut().map(|m| m.tick(rng)).sum()

@@ -1283,3 +1283,62 @@ pub const HAT: &[Mode] = &[
         decay: 0.37,
     },
 ];
+
+/// A snare head, from a recording of a dry snare (samples/): not an
+/// ideal membrane. Tuned tight on a shallow shell, its (1,1) sits at
+/// 1.2–1.5× the fundamental as a cluster rather than the membrane's
+/// 1.59×, a second group lands around 3.3–4×, and everything is gone
+/// in tens of milliseconds — the wires are the note. A snare pad on
+/// the MEMBRANE table was a tom with a rattle, and looked it.
+pub const SNARE: &[Mode] = &[
+    Mode {
+        ratio: 1.00,
+        gain: 1.00,
+        decay: 0.09,
+    },
+    Mode {
+        ratio: 0.73,
+        gain: 0.10,
+        decay: 0.06,
+    },
+    Mode {
+        ratio: 1.20,
+        gain: 0.12,
+        decay: 0.07,
+    },
+    Mode {
+        ratio: 1.29,
+        gain: 0.28,
+        decay: 0.07,
+    },
+    Mode {
+        ratio: 1.46,
+        gain: 0.14,
+        decay: 0.06,
+    },
+    Mode {
+        ratio: 1.62,
+        gain: 0.20,
+        decay: 0.06,
+    },
+    Mode {
+        ratio: 2.31,
+        gain: 0.10,
+        decay: 0.05,
+    },
+    Mode {
+        ratio: 3.28,
+        gain: 0.10,
+        decay: 0.05,
+    },
+    Mode {
+        ratio: 3.75,
+        gain: 0.11,
+        decay: 0.05,
+    },
+    Mode {
+        ratio: 4.08,
+        gain: 0.12,
+        decay: 0.05,
+    },
+];

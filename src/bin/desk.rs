@@ -58,6 +58,33 @@ const STRIP_NAMES: [&str; 3] = ["drums", "string", "voice"];
 /// Points in the string-motion scope the audio thread keeps refreshed.
 const SCOPE_LEN: usize = 128;
 
+/// What the views draw, refreshed by the audio thread ~30×/s: the
+/// selected mesh head and cymbal plate as displacement fields, and the
+/// selected modal pad's modes as (Hz, table gain, live amplitude).
+struct ViewData {
+    mesh: Vec<f32>,
+    cymbal: Vec<f32>,
+    /// Mean-square displacement per cell since the last refresh: the
+    /// energy view, which does not flicker (an instantaneous surface
+    /// oscillating at hundreds of Hz, sampled 30×/s, is a random
+    /// phase each frame) and shows the mode shapes as Chladni did —
+    /// bright lobes, dark nodal lines.
+    mesh_energy: Vec<f32>,
+    cymbal_energy: Vec<f32>,
+    ladder: Vec<(f32, f32, f32)>,
+    /// The pad's noise burst: (level, tone, wash center Hz).
+    noise: (f32, f32, f32),
+}
+
+/// Which pads the views should watch (the UI's current selections).
+struct ViewCtl {
+    pad: AtomicUsize,
+    mesh: AtomicUsize,
+    cymbal: AtomicUsize,
+    /// Accumulate energy (else only the instantaneous surface).
+    energy: AtomicBool,
+}
+
 enum Msg {
     /// A finished render for the buffer player (voice one-shots).
     Buffer(usize, Vec<f32>, Option<u8>),
@@ -176,6 +203,8 @@ fn start_audio(
     cymbal_pads: Vec<cymbal::CymbalParams>,
     modes: Arc<cymbal::Modes>,
     loop_ctl: Arc<LoopCtl>,
+    view: Arc<Mutex<ViewData>>,
+    view_ctl: Arc<ViewCtl>,
 ) -> cpal::Stream {
     let device = cpal::default_host()
         .default_output_device()
@@ -220,6 +249,12 @@ fn start_audio(
     // The looper lives here, on the output frame clock, so its
     // timing is sample-exact whatever the UI thread's jitter.
     let mut looper: Looper<Hit> = Looper::new();
+    // Energy accumulators for the surface views, summed every few
+    // frames and handed over at the next refresh.
+    let mut acc_mesh = vec![0.0f32; mesh::Mesh::width() * mesh::Mesh::width()];
+    let mut acc_cymbal = vec![0.0f32; cymbal::Cymbal::width() * cymbal::Cymbal::width()];
+    let mut acc_scratch = vec![0.0f32; cymbal::Cymbal::width() * cymbal::Cymbal::width()];
+    let mut acc_n = 0u32;
     let mut clock: u64 = 0;
     let mut due: Vec<Hit> = Vec::new();
     // Metronome: a short sine ping, higher on beat one.
@@ -324,6 +359,19 @@ fn start_audio(
                         loop_ctl.pos.set(looper.position(clock));
                         loop_ctl.len.set(looper.len_secs());
                     }
+                    if view_ctl.energy.load(Relaxed) && clock % 8 == 0 {
+                        if let Some(u) = ins.heads.surface(view_ctl.mesh.load(Relaxed)) {
+                            for (a, v) in acc_mesh.iter_mut().zip(u) {
+                                *a += v * v;
+                            }
+                        }
+                        ins.cymbals
+                            .surface(view_ctl.cymbal.load(Relaxed), &mut acc_scratch);
+                        for (a, v) in acc_cymbal.iter_mut().zip(&acc_scratch) {
+                            *a += v * v;
+                        }
+                        acc_n += 1;
+                    }
                     clock += 1;
                     // Sum each strip dry first: the body must see the
                     // strip's whole signal once, not each voice.
@@ -403,6 +451,30 @@ fn start_audio(
                 if let Ok(mut s) = scope.try_lock() {
                     ins.bank.shape(p.bow_string, &mut s);
                 }
+                if let Ok(mut v) = view.try_lock() {
+                    if let Some(u) = ins.heads.surface(view_ctl.mesh.load(Relaxed)) {
+                        v.mesh.copy_from_slice(u);
+                    }
+                    ins.cymbals
+                        .surface(view_ctl.cymbal.load(Relaxed), &mut v.cymbal);
+                    if acc_n > 0 {
+                        let k = 1.0 / acc_n as f32;
+                        for (e, a) in v.mesh_energy.iter_mut().zip(acc_mesh.iter_mut()) {
+                            *e = *a * k;
+                            *a = 0.0;
+                        }
+                        for (e, a) in v.cymbal_energy.iter_mut().zip(acc_cymbal.iter_mut()) {
+                            *e = *a * k;
+                            *a = 0.0;
+                        }
+                        acc_n = 0;
+                    }
+                    let sel = view_ctl.pad.load(Relaxed);
+                    let mut ladder = std::mem::take(&mut v.ladder);
+                    ins.kit.mode_levels(sel, &mut ladder);
+                    v.ladder = ladder;
+                    v.noise = ins.kit.noise_view(sel);
+                }
             },
             |e| eprintln!("audio error: {e}"),
             None,
@@ -424,6 +496,7 @@ enum ModeSet {
     Ride,
     Gong,
     Hat,
+    Snare,
     NoiseOnly,
 }
 
@@ -438,6 +511,7 @@ impl ModeSet {
             ModeSet::Ride => modal::RIDE,
             ModeSet::Gong => modal::GONG,
             ModeSet::Hat => modal::HAT,
+            ModeSet::Snare => modal::SNARE,
             ModeSet::NoiseOnly => &[],
         }
     }
@@ -451,6 +525,7 @@ impl ModeSet {
             ModeSet::Ride => "ride (synth)",
             ModeSet::Gong => "gong (synth)",
             ModeSet::Hat => "hi-hat (synth)",
+            ModeSet::Snare => "snare head",
             ModeSet::NoiseOnly => "noise only",
         }
     }
@@ -536,6 +611,7 @@ fn default_pads() -> Vec<DrumParams> {
         },
         DrumParams {
             name: "snare",
+            modes: ModeSet::Snare,
             freq: 185.0,
             glide: 0.15,
             glide_time: 0.05,
@@ -762,6 +838,13 @@ struct Desk {
     hat: hihat::HiHatParams,
     pedal_down: bool,
     loop_ctl: Arc<LoopCtl>,
+    view: Arc<Mutex<ViewData>>,
+    view_ctl: Arc<ViewCtl>,
+    /// Running peaks the views normalize against (decaying, so a
+    /// quiet tail still shows).
+    gain_mesh: f32,
+    gain_cymbal: f32,
+    gain_ladder: f32,
     rolling: [bool; NPADS],
     drum_down: [bool; NPADS],
     last_mouth_pos: Option<egui::Pos2>,
@@ -812,6 +895,132 @@ impl Desk {
 /// ("rattle decay" ≈ 82 + 48 + 16) without spilling into the next column.
 fn track_width(ui: &egui::Ui) -> f32 {
     (ui.available_width() - 170.0).clamp(40.0, 200.0)
+}
+
+/// A field on a square, normalized by a decaying running peak. Motion:
+/// blue down, red up, on the panel ground. Energy: mean-square
+/// displacement, dark to hot — the Chladni figure, with nodal lines
+/// dark, and no flicker.
+fn draw_surface(
+    ui: &mut egui::Ui,
+    field: &[f32],
+    w: usize,
+    size: f32,
+    gain: &mut f32,
+    energy: bool,
+) {
+    let peak = field.iter().fold(0.0f32, |m, v| m.max(v.abs()));
+    *gain = (*gain * 0.97).max(peak).max(1e-9);
+    let (rect, _) = ui.allocate_exact_size(egui::vec2(size, size), egui::Sense::hover());
+    let painter = ui.painter_at(rect);
+    let bg = ui.visuals().extreme_bg_color;
+    painter.rect_filled(rect, 4.0, bg);
+    let cell = size / w as f32;
+    let up = egui::Color32::from_rgb(255, 120, 60);
+    let down = egui::Color32::from_rgb(70, 140, 255);
+    let hot = egui::Color32::from_rgb(255, 230, 120);
+    let warm = egui::Color32::from_rgb(200, 60, 40);
+    for j in 0..w {
+        for i in 0..w {
+            let v = (field[j * w + i] / *gain).clamp(-1.0, 1.0);
+            if v.abs() < 0.02 {
+                continue;
+            }
+            let c = if energy {
+                // Square root so the quiet lobes read too.
+                let t = v.max(0.0).sqrt();
+                if t < 0.5 {
+                    bg.lerp_to_gamma(warm, t * 2.0)
+                } else {
+                    warm.lerp_to_gamma(hot, (t - 0.5) * 2.0)
+                }
+            } else if v > 0.0 {
+                bg.lerp_to_gamma(up, v)
+            } else {
+                bg.lerp_to_gamma(down, -v)
+            };
+            let p = egui::pos2(rect.left() + i as f32 * cell, rect.top() + j as f32 * cell);
+            painter.rect_filled(
+                egui::Rect::from_min_size(p, egui::vec2(cell + 0.5, cell + 0.5)),
+                0.0,
+                c,
+            );
+        }
+    }
+}
+
+/// The mode ladder: each mode a bar on a log-frequency axis, grey to
+/// its table gain, lit to its live amplitude (normalized by a decaying
+/// running peak). Shimmer partners draw beside their primaries.
+fn draw_ladder(
+    ui: &mut egui::Ui,
+    modes: &[(f32, f32, f32)],
+    noise: (f32, f32, f32),
+    gain: &mut f32,
+) {
+    let h = 70.0;
+    let (rect, _) =
+        ui.allocate_exact_size(egui::vec2(ui.available_width(), h), egui::Sense::hover());
+    let painter = ui.painter_at(rect);
+    painter.rect_filled(rect, 4.0, ui.visuals().extreme_bg_color);
+    let (lo, hi) = (40.0f32.ln(), 16000.0f32.ln());
+    let x_of = |f: f32| rect.left() + rect.width() * ((f.max(40.0).ln() - lo) / (hi - lo));
+    // Ticks at 100 Hz, 1 kHz, 10 kHz.
+    for f in [100.0, 1000.0, 10000.0] {
+        painter.vline(
+            x_of(f),
+            rect.y_range(),
+            egui::Stroke::new(1.0, ui.visuals().weak_text_color().gamma_multiply(0.4)),
+        );
+    }
+    // The noise burst, so the picture is honest about where a pad's
+    // sound comes from: a translucent band, rising to the right for
+    // the flat (differenced) rattle, a hump around the wash's sliding
+    // resonance for the toned one, its height the burst's level.
+    let (nl, tone, fc) = noise;
+    if nl > 0.01 {
+        let strips = 48;
+        let band = egui::Color32::from_rgb(120, 200, 160);
+        for k in 0..strips {
+            let t0 = k as f32 / strips as f32;
+            let t1 = (k + 1) as f32 / strips as f32;
+            let f = (lo + (hi - lo) * (t0 + t1) * 0.5).exp();
+            let flat = 0.15 + 0.85 * t0;
+            let oct = (f / fc).ln() / std::f32::consts::LN_2;
+            let hump = (-0.5 * oct * oct).exp();
+            let a = (nl * ((1.0 - tone) * flat + tone * hump)).clamp(0.0, 1.0);
+            let x0 = rect.left() + rect.width() * t0;
+            let x1 = rect.left() + rect.width() * t1;
+            let top = rect.bottom() - 2.0 - (h - 6.0) * a;
+            painter.rect_filled(
+                egui::Rect::from_min_max(egui::pos2(x0, top), egui::pos2(x1, rect.bottom() - 2.0)),
+                0.0,
+                band.gamma_multiply(0.35),
+            );
+        }
+    }
+    let peak = modes.iter().fold(0.0f32, |m, v| m.max(v.2));
+    *gain = (*gain * 0.95).max(peak).max(1e-5);
+    let gmax = modes.iter().fold(0.0f32, |m, v| m.max(v.1)).max(1e-6);
+    for &(f, g, a) in modes {
+        if f > 16000.0 {
+            continue;
+        }
+        let x = x_of(f);
+        let y0 = rect.bottom() - 2.0;
+        let gh = (h - 6.0) * (g / gmax);
+        painter.line_segment(
+            [egui::pos2(x, y0), egui::pos2(x, y0 - gh)],
+            egui::Stroke::new(2.0, ui.visuals().weak_text_color().gamma_multiply(0.5)),
+        );
+        let ah = (h - 6.0) * (a / *gain).clamp(0.0, 1.0);
+        if ah > 0.5 {
+            painter.line_segment(
+                [egui::pos2(x, y0), egui::pos2(x, y0 - ah)],
+                egui::Stroke::new(2.0, egui::Color32::from_rgb(255, 190, 80)),
+            );
+        }
+    }
 }
 
 fn slider(
@@ -1175,6 +1384,7 @@ impl eframe::App for Desk {
                                 ModeSet::Ride,
                                 ModeSet::Gong,
                                 ModeSet::Hat,
+                                ModeSet::Snare,
                                 ModeSet::NoiseOnly,
                             ] {
                                 edited |= ui.selectable_value(&mut p.modes, m, m.name()).changed();
@@ -1211,6 +1421,11 @@ impl eframe::App for Desk {
                     if edited {
                         let _ = self.tx.send(Msg::Pad(self.pad_sel, p.to_pad()));
                     }
+                    // The mode ladder: this pad's partials, lit as they ring.
+                    self.view_ctl.pad.store(self.pad_sel, Relaxed);
+                    if let Ok(v) = self.view.lock() {
+                        draw_ladder(ui, &v.ladder, v.noise, &mut self.gain_ladder);
+                    }
 
                     // ---- Mesh drums: the membrane as a membrane.
                     ui.separator();
@@ -1246,6 +1461,21 @@ impl eframe::App for Desk {
                     edited |= slider(ui, &mut m.level, 0.0..=4.0, false, "level");
                     if edited {
                         let _ = self.tx.send(Msg::MeshPad(self.mesh_sel, *m));
+                    }
+                    // The head itself, moving.
+                    self.view_ctl.mesh.store(self.mesh_sel, Relaxed);
+                    let mut energy = self.view_ctl.energy.load(Relaxed);
+                    if ui
+                        .checkbox(&mut energy, "energy view (mode shapes, no flicker)")
+                        .changed()
+                    {
+                        self.view_ctl.energy.store(energy, Relaxed);
+                    }
+                    if let Ok(v) = self.view.lock() {
+                        let w = mesh::Mesh::width();
+                        let size = ui.available_width().min(220.0);
+                        let field = if energy { &v.mesh_energy } else { &v.mesh };
+                        draw_surface(ui, field, w, size, &mut self.gain_mesh, energy);
                     }
 
                     // ---- Strings.
@@ -1374,6 +1604,15 @@ impl eframe::App for Desk {
                     edited |= slider(ui, &mut c.level, 0.0..=4.0, false, "level");
                     if edited {
                         let _ = self.tx.send(Msg::CymbalPad(self.cymbal_sel, *c));
+                    }
+                    // The plate itself, bending.
+                    self.view_ctl.cymbal.store(self.cymbal_sel, Relaxed);
+                    if let Ok(v) = self.view.lock() {
+                        let w = cymbal::Cymbal::width();
+                        let size = ui.available_width().min(220.0);
+                        let energy = self.view_ctl.energy.load(Relaxed);
+                        let field = if energy { &v.cymbal_energy } else { &v.cymbal };
+                        draw_surface(ui, field, w, size, &mut self.gain_cymbal, energy);
                     }
 
                     // ---- Hi-hat: two plates on a pedal.
@@ -1688,6 +1927,20 @@ fn main() -> eframe::Result {
         pos: AtomicF32::new(0.0),
         len: AtomicF32::new(0.0),
     });
+    let view = Arc::new(Mutex::new(ViewData {
+        mesh: vec![0.0; mesh::Mesh::width() * mesh::Mesh::width()],
+        cymbal: vec![0.0; cymbal::Cymbal::width() * cymbal::Cymbal::width()],
+        ladder: Vec::new(),
+        noise: (0.0, 0.0, 1500.0),
+        mesh_energy: vec![0.0; mesh::Mesh::width() * mesh::Mesh::width()],
+        cymbal_energy: vec![0.0; cymbal::Cymbal::width() * cymbal::Cymbal::width()],
+    }));
+    let view_ctl = Arc::new(ViewCtl {
+        pad: AtomicUsize::new(0),
+        mesh: AtomicUsize::new(0),
+        cymbal: AtomicUsize::new(0),
+        energy: AtomicBool::new(true),
+    });
     let cymbal_pads = cymbal::default_kit();
     assert_eq!(
         cymbal_pads.len(),
@@ -1707,6 +1960,8 @@ fn main() -> eframe::Result {
         cymbal_pads.iter().map(|(_, c)| *c).collect(),
         modes,
         loop_ctl.clone(),
+        view.clone(),
+        view_ctl.clone(),
     );
 
     let desk = Desk {
@@ -1729,6 +1984,11 @@ fn main() -> eframe::Result {
         hat: hihat::default_params(),
         pedal_down: false,
         loop_ctl,
+        view,
+        view_ctl,
+        gain_mesh: 1e-3,
+        gain_cymbal: 1e-3,
+        gain_ladder: 1e-3,
         rolling: [false; NPADS],
         drum_down: [false; NPADS],
         last_mouth_pos: None,
