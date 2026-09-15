@@ -14,8 +14,10 @@
 //! tongue surface, a live tube-profile drawing, and a phoneme box that
 //! speaks through timber::speak.
 //!
-//! Keys: Z X C V B N M , . 8 9 0 = drums (shift = roll) · 1 2 3 4 5 = mesh drums
-//! · 6 7 = cymbals (shift = hard hit) · space = loop · A S D F G H J K =
+//! Keys: the number row 1..= is the modal kit (shift = roll); the
+//! bottom row is the physical kit — Z X C V B mesh drums, N M cymbals
+//! (shift = hard hit), , hi-hat, hold . for the pedal · space = loop ·
+//! A S D F G H J K =
 //! pluck strings (finger while bowing; melody while a voice engine is
 //! held or speaking) · Q W E R T = vowels (steer the held engine).
 //! Bow surface: hold, x-offset from center = speed, height = pressure.
@@ -30,7 +32,7 @@ use eframe::egui;
 use timber::looper::Looper;
 use timber::util::{AtomicF32, Rng, SR};
 use timber::voice::{self, Note, Vowel};
-use timber::{body, cymbal, drums, mesh, modal, mouth, sing, speak, stream, tract};
+use timber::{body, cymbal, drums, hihat, mesh, modal, mouth, sing, speak, stream, tract};
 
 // ---- Lock-free mixer state shared with the audio thread -----------------
 
@@ -82,6 +84,10 @@ enum Msg {
     CymbalPad(usize, cymbal::CymbalParams),
     /// The looper's one button, undo and clear.
     Loop(LoopCmd),
+    /// Hi-hat: stick on the top plate, the pedal, its params.
+    HatStrike(f32),
+    HatPedal(bool),
+    HatPad(hihat::HiHatParams),
 }
 
 #[derive(Clone, Copy)]
@@ -102,6 +108,8 @@ enum Hit {
     Cymbal(usize, f32),
     Pluck(usize),
     Roll(usize, bool),
+    Hat(f32),
+    Pedal(bool),
 }
 
 /// Looper settings and its state for display, shared with the audio
@@ -117,21 +125,26 @@ struct LoopCtl {
     len: AtomicF32,
 }
 
-fn dispatch(
-    hit: Hit,
-    bank: &mut stream::Bank,
-    kit: &mut drums::Kit,
-    heads: &mut mesh::Kit,
-    cymbals: &mut cymbal::Kit,
-    pluck_pos: f32,
-    rng: &mut Rng,
-) {
-    match hit {
-        Hit::Pad(i) => kit.strike(i),
-        Hit::Mesh(i, s) => heads.strike(i, s),
-        Hit::Cymbal(i, s) => cymbals.strike(i, s),
-        Hit::Pluck(i) => bank.pluck(i, pluck_pos, rng),
-        Hit::Roll(i, on) => kit.set_roll(i, on),
+/// Everything a hit can land on.
+struct Instruments {
+    bank: stream::Bank,
+    kit: drums::Kit,
+    heads: mesh::Kit,
+    cymbals: cymbal::Kit,
+    hat: hihat::HiHat,
+}
+
+impl Instruments {
+    fn dispatch(&mut self, hit: Hit, pluck_pos: f32, rng: &mut Rng) {
+        match hit {
+            Hit::Pad(i) => self.kit.strike(i),
+            Hit::Mesh(i, s) => self.heads.strike(i, s),
+            Hit::Cymbal(i, s) => self.cymbals.strike(i, s),
+            Hit::Pluck(i) => self.bank.pluck(i, pluck_pos, rng),
+            Hit::Roll(i, on) => self.kit.set_roll(i, on),
+            Hit::Hat(s) => self.hat.strike(s),
+            Hit::Pedal(down) => self.hat.pedal(down),
+        }
     }
 }
 
@@ -182,10 +195,13 @@ fn start_audio(
     let step = SR / config.sample_rate.0 as f32;
     let choke_step = 1.0 / (0.004 * config.sample_rate.0 as f32);
 
-    let mut bank = stream::Bank::new(&string_freqs);
-    let mut kit = drums::Kit::new(pads);
-    let mut heads = mesh::Kit::new(mesh_pads);
-    let mut cymbals = cymbal::Kit::new(modes, cymbal_pads);
+    let mut ins = Instruments {
+        bank: stream::Bank::new(&string_freqs),
+        kit: drums::Kit::new(pads),
+        heads: mesh::Kit::new(mesh_pads),
+        cymbals: cymbal::Kit::new(modes.clone(), cymbal_pads),
+        hat: hihat::HiHat::new(modes, hihat::default_params()),
+    };
     let mut mouth = mouth::Mouth::new();
     let mut tube = tract::Tract::new();
     let mut utter: Option<speak::Utterance> = None;
@@ -226,19 +242,13 @@ fn start_audio(
                         Msg::Roll(i, on) => Some(Hit::Roll(i, on)),
                         Msg::MeshStrike(i, s) => Some(Hit::Mesh(i, s)),
                         Msg::CymbalStrike(i, s) => Some(Hit::Cymbal(i, s)),
+                        Msg::HatStrike(s) => Some(Hit::Hat(s)),
+                        Msg::HatPedal(down) => Some(Hit::Pedal(down)),
                         _ => None,
                     };
                     if let Some(h) = hit {
                         looper.record(clock, h);
-                        dispatch(
-                            h,
-                            &mut bank,
-                            &mut kit,
-                            &mut heads,
-                            &mut cymbals,
-                            ctl.pluck_pos.get(),
-                            &mut rng,
-                        );
+                        ins.dispatch(h, ctl.pluck_pos.get(), &mut rng);
                         continue;
                     }
                     match msg {
@@ -246,15 +256,18 @@ fn start_audio(
                         | Msg::Strike(_)
                         | Msg::Roll(..)
                         | Msg::MeshStrike(..)
-                        | Msg::CymbalStrike(..) => unreachable!(),
+                        | Msg::CymbalStrike(..)
+                        | Msg::HatStrike(_)
+                        | Msg::HatPedal(_) => unreachable!(),
+                        Msg::HatPad(params) => ins.hat.set_params(params),
                         Msg::Loop(LoopCmd::Toggle) => looper.toggle(clock),
                         Msg::Loop(LoopCmd::Stop) => looper.stop(clock),
                         Msg::Loop(LoopCmd::Undo) => looper.undo(),
                         Msg::Loop(LoopCmd::Clear) => looper.clear(),
-                        Msg::Pad(i, params) => kit.set_params(i, params),
+                        Msg::Pad(i, params) => ins.kit.set_params(i, params),
                         Msg::Speak(segs) => utter = speak::Utterance::new(segs),
-                        Msg::MeshPad(i, params) => heads.set_params(i, params),
-                        Msg::CymbalPad(i, params) => cymbals.set_params(i, params),
+                        Msg::MeshPad(i, params) => ins.heads.set_params(i, params),
+                        Msg::CymbalPad(i, params) => ins.cymbals.set_params(i, params),
                         Msg::Knock(i) => {
                             let sel = mixer.strips[i].body.load(Relaxed).min(bodies[i].len() - 1);
                             if sel > 0 {
@@ -296,15 +309,7 @@ fn start_audio(
                     due.clear();
                     looper.due(clock, &mut due);
                     for h in due.drain(..) {
-                        dispatch(
-                            h,
-                            &mut bank,
-                            &mut kit,
-                            &mut heads,
-                            &mut cymbals,
-                            ctl.pluck_pos.get(),
-                            &mut rng,
-                        );
+                        ins.dispatch(h, ctl.pluck_pos.get(), &mut rng);
                     }
                     if loop_ctl.click.load(Relaxed)
                         && let Some(one) = looper.beat(clock)
@@ -345,9 +350,11 @@ fn start_audio(
                         sums[v.strip] += s;
                         true
                     });
-                    sums[STRING] += bank.tick(&p);
-                    sums[DRUMS] +=
-                        kit.tick(&mut rng) + heads.tick(&mut rng) + cymbals.tick(&mut rng);
+                    sums[STRING] += ins.bank.tick(&p);
+                    sums[DRUMS] += ins.kit.tick(&mut rng)
+                        + ins.heads.tick(&mut rng)
+                        + ins.cymbals.tick(&mut rng)
+                        + ins.hat.tick(&mut rng);
                     sums[VOICE] += mouth.tick(&mp, &mut rng);
                     // A running utterance overrides the pad's
                     // articulation; pitch/level stay live. Release
@@ -394,7 +401,7 @@ fn start_audio(
                     }
                 }
                 if let Ok(mut s) = scope.try_lock() {
-                    bank.shape(p.bow_string, &mut s);
+                    ins.bank.shape(p.bow_string, &mut s);
                 }
             },
             |e| eprintln!("audio error: {e}"),
@@ -416,6 +423,7 @@ enum ModeSet {
     Cymbal,
     Ride,
     Gong,
+    Hat,
     NoiseOnly,
 }
 
@@ -429,6 +437,7 @@ impl ModeSet {
             ModeSet::Cymbal => modal::CYMBAL,
             ModeSet::Ride => modal::RIDE,
             ModeSet::Gong => modal::GONG,
+            ModeSet::Hat => modal::HAT,
             ModeSet::NoiseOnly => &[],
         }
     }
@@ -441,6 +450,7 @@ impl ModeSet {
             ModeSet::Cymbal => "cymbal (synth)",
             ModeSet::Ride => "ride (synth)",
             ModeSet::Gong => "gong (synth)",
+            ModeSet::Hat => "hi-hat (synth)",
             ModeSet::NoiseOnly => "noise only",
         }
     }
@@ -554,21 +564,33 @@ fn default_pads() -> Vec<DrumParams> {
             glide_time: 0.12,
             ..base
         },
+        // Synth hats: the HAT partials under a bright noise burst, the
+        // closed one muffled hard (the pressed pair), the open one
+        // ringing with a wash and a little shimmer. Same choke group,
+        // so the closed hat cuts the open one — the pedal, by rule.
         DrumParams {
             name: "hat",
-            modes: ModeSet::NoiseOnly,
-            noise: 1.0,
-            noise_decay: 0.025,
-            level: 0.4,
+            modes: ModeSet::Hat,
+            freq: 600.0,
+            damp: 0.08,
+            noise: 0.9,
+            noise_decay: 0.03,
+            noise_tone: 0.3,
+            level: 0.35,
             choke: Some(0),
             ..base
         },
         DrumParams {
             name: "open hat",
-            modes: ModeSet::NoiseOnly,
-            noise: 1.0,
-            noise_decay: 0.18,
-            level: 0.4,
+            modes: ModeSet::Hat,
+            freq: 600.0,
+            damp: 0.6,
+            noise: 0.8,
+            noise_decay: 0.25,
+            noise_tone: 0.6,
+            bloom: 0.3,
+            shimmer: 0.8,
+            level: 0.35,
             choke: Some(0),
             ..base
         },
@@ -655,32 +677,37 @@ const VOWELS: [(&str, Vowel); 5] = [
 /// shift+',' into ';' — which would strand roll state). Must stay in
 /// step with default_pads(): asserted at startup.
 const DRUM_KEYS: [egui::Key; 12] = [
-    egui::Key::Z,
-    egui::Key::X,
-    egui::Key::C,
-    egui::Key::V,
-    egui::Key::B,
-    egui::Key::N,
-    egui::Key::M,
-    egui::Key::Comma,
-    egui::Key::Period,
-    egui::Key::Num8,
-    egui::Key::Num9,
-    egui::Key::Num0,
-];
-const NPADS: usize = DRUM_KEYS.len();
-/// Mesh pads: number row. Shift = a hard hit (the tension glide and
-/// the snare's full rattle only show up when the stick really lands).
-const MESH_KEYS: [egui::Key; 5] = [
     egui::Key::Num1,
     egui::Key::Num2,
     egui::Key::Num3,
     egui::Key::Num4,
     egui::Key::Num5,
+    egui::Key::Num6,
+    egui::Key::Num7,
+    egui::Key::Num8,
+    egui::Key::Num9,
+    egui::Key::Num0,
+    egui::Key::Minus,
+    egui::Key::Equals,
+];
+const NPADS: usize = DRUM_KEYS.len();
+/// The physical kit lives on the bottom row: mesh pads, then the
+/// cymbals, then the hi-hat and its pedal. Shift = a hard hit (the
+/// tension glide and the snare's full rattle only show up when the
+/// stick really lands).
+const MESH_KEYS: [egui::Key; 5] = [
+    egui::Key::Z,
+    egui::Key::X,
+    egui::Key::C,
+    egui::Key::V,
+    egui::Key::B,
 ];
 const NMESH: usize = MESH_KEYS.len();
-/// Cymbal pads: 6 7. Shift = hard hit.
-const CYMBAL_KEYS: [egui::Key; 2] = [egui::Key::Num6, egui::Key::Num7];
+/// Cymbal pads: N M. Shift = hard hit.
+const CYMBAL_KEYS: [egui::Key; 2] = [egui::Key::N, egui::Key::M];
+/// Hi-hat: stick, and the pedal (held).
+const HAT_KEY: egui::Key = egui::Key::Comma;
+const PEDAL_KEY: egui::Key = egui::Key::Period;
 const NCYMBAL: usize = CYMBAL_KEYS.len();
 const NOTE_KEYS: [egui::Key; 8] = [
     egui::Key::A,
@@ -732,6 +759,8 @@ struct Desk {
     mesh_sel: usize,
     cymbal_pads: Vec<(&'static str, cymbal::CymbalParams)>,
     cymbal_sel: usize,
+    hat: hihat::HiHatParams,
+    pedal_down: bool,
     loop_ctl: Arc<LoopCtl>,
     rolling: [bool; NPADS],
     drum_down: [bool; NPADS],
@@ -836,6 +865,10 @@ impl eframe::App for Desk {
                 // A focused text field owns the keyboard: no plucks,
                 // strikes or rolls while spelling out phonemes.
                 self.drum_down = [false; NPADS];
+                if self.pedal_down {
+                    self.pedal_down = false;
+                    let _ = self.tx.send(Msg::HatPedal(false));
+                }
                 for k in 0..NPADS {
                     if self.rolling[k] {
                         self.rolling[k] = false;
@@ -856,7 +889,15 @@ impl eframe::App for Desk {
                     continue;
                 };
                 let key = physical_key.unwrap_or(*key);
-                if *pressed && !*repeat && key == egui::Key::Space {
+                if key == PEDAL_KEY {
+                    // The pedal: down while held, up on release.
+                    if !*repeat && *pressed != self.pedal_down {
+                        self.pedal_down = *pressed;
+                        acts.push((if *pressed { 12 } else { 13 }, 0));
+                    }
+                } else if *pressed && !*repeat && key == HAT_KEY {
+                    acts.push((11, if i.modifiers.shift { 1 } else { 0 }));
+                } else if *pressed && !*repeat && key == egui::Key::Space {
                     acts.push((if i.modifiers.shift { 10 } else { 7 }, 0));
                 } else if *pressed && !*repeat && key == egui::Key::Backspace {
                     acts.push((if i.modifiers.shift { 9 } else { 8 }, 0));
@@ -905,6 +946,15 @@ impl eframe::App for Desk {
                 }
                 10 => {
                     let _ = self.tx.send(Msg::Loop(LoopCmd::Stop));
+                }
+                11 => {
+                    let _ = self.tx.send(Msg::HatStrike(if k == 1 { 1.6 } else { 0.8 }));
+                }
+                12 => {
+                    let _ = self.tx.send(Msg::HatPedal(true));
+                }
+                13 => {
+                    let _ = self.tx.send(Msg::HatPedal(false));
                 }
                 // Left hand fingers, right hand excites: while the bow
                 // is on the string, a key only changes the fingered
@@ -1078,9 +1128,9 @@ impl eframe::App for Desk {
             ui.small("space — loop: record / close & play / overdub ↔ jam");
             ui.small("shift+space — stop / restart");
             ui.small("backspace — undo last layer (shift: clear)");
-            ui.small("Z X C V B N M , . 8 9 0 — drums (shift = roll)");
-            ui.small("1 2 3 4 5 — mesh drums (shift = hard hit)");
-            ui.small("6 7 — cymbals (shift = hard hit)");
+            ui.small("1 2 3 4 5 6 7 8 9 0 - = — modal kit (shift = roll)");
+            ui.small("Z X C V B — mesh drums · N M — cymbals (shift = hard hit)");
+            ui.small(", — hi-hat (shift = hard) · hold . — pedal down");
             ui.small("A S D F G H J K — pluck (finger, while bowing)");
             ui.small("Q W E R T — vowels");
             ui.small("hold bow surface — bow");
@@ -1124,6 +1174,7 @@ impl eframe::App for Desk {
                                 ModeSet::Cymbal,
                                 ModeSet::Ride,
                                 ModeSet::Gong,
+                                ModeSet::Hat,
                                 ModeSet::NoiseOnly,
                             ] {
                                 edited |= ui.selectable_value(&mut p.modes, m, m.name()).changed();
@@ -1323,6 +1374,32 @@ impl eframe::App for Desk {
                     edited |= slider(ui, &mut c.level, 0.0..=4.0, false, "level");
                     if edited {
                         let _ = self.tx.send(Msg::CymbalPad(self.cymbal_sel, *c));
+                    }
+
+                    // ---- Hi-hat: two plates on a pedal.
+                    ui.separator();
+                    ui.heading("hi-hat · two plates");
+                    ui.horizontal(|ui| {
+                        if ui.button("hit").clicked() {
+                            let _ = self.tx.send(Msg::HatStrike(0.8));
+                        }
+                        let mut down = self.pedal_down;
+                        if ui.toggle_value(&mut down, "pedal").changed() {
+                            self.pedal_down = down;
+                            let _ = self.tx.send(Msg::HatPedal(down));
+                        }
+                    });
+                    let h = &mut self.hat;
+                    let mut edited = false;
+                    edited |= slider(ui, &mut h.plate.stiffness, 0.0..=1.0, false, "stiffness");
+                    edited |= slider(ui, &mut h.plate.dome, 10.0..=600.0, true, "dome");
+                    edited |= slider(ui, &mut h.plate.decay, 0.1..=8.0, true, "decay");
+                    edited |= slider(ui, &mut h.plate.hf_damp, 0.0..=1.0, false, "hf damp");
+                    edited |= slider(ui, &mut h.gap, 0.02..=1.0, true, "gap");
+                    edited |= slider(ui, &mut h.press, 0.0..=1.0, false, "press");
+                    edited |= slider(ui, &mut h.level, 0.0..=4.0, false, "level");
+                    if edited {
+                        let _ = self.tx.send(Msg::HatPad(*h));
                     }
 
                     // ---- Voice.
@@ -1649,6 +1726,8 @@ fn main() -> eframe::Result {
         mesh_sel: 0,
         cymbal_pads,
         cymbal_sel: 0,
+        hat: hihat::default_params(),
+        pedal_down: false,
         loop_ctl,
         rolling: [false; NPADS],
         drum_down: [false; NPADS],

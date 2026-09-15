@@ -364,6 +364,14 @@ pub struct Cymbal {
     patch_mass: f32,
     stick: Stick,
     force: Vec<f32>,
+    /// External modal force for the next step (another body touching
+    /// this one — the hi-hat's other plate), set per sample, consumed
+    /// per step.
+    ext: Vec<f32>,
+    /// External per-mode damping, applied implicitly (a damper from
+    /// outside — felt pressing on the plate — stable at any strength,
+    /// where an explicit damping force overshoots the step past ~1).
+    ext_damp: Vec<f32>,
     q_next: Vec<f32>,
     /// Each mode's own nonlinear stiffness this step, Σ_p g_p H^p_ii.
     dk: Vec<f32>,
@@ -391,6 +399,8 @@ impl Cymbal {
             patch_mass: 1.0,
             stick: Stick::default(),
             force: vec![0.0; n],
+            ext: vec![0.0; n],
+            ext_damp: vec![0.0; n],
             q_next: vec![0.0; n],
             dk: vec![0.0; n],
             energy_max: 0.0,
@@ -439,6 +449,67 @@ impl Cymbal {
         self.phi_patch.iter().zip(&self.q).map(|(a, b)| a * b).sum()
     }
 
+    /// Per-mode weights of a raised-cosine patch at grid coordinates
+    /// (for a contact somewhere other than the stick's).
+    pub fn weights_at(&self, center: (f32, f32), rad: f32) -> Vec<f32> {
+        let (patch, _) = stick::patch(&self.modes.disc.mask, W, center, rad);
+        self.modes
+            .phi
+            .iter()
+            .map(|f| patch.iter().map(|&(idx, w)| w * f[idx]).sum())
+            .collect()
+    }
+
+    /// Grid coordinates of a point at `frac` of the radius along +x.
+    pub fn point(&self, frac: f32) -> (f32, f32) {
+        self.modes.disc.strike_center(frac)
+    }
+
+    /// Displacement and velocity (per internal step) under a weight set.
+    pub fn displacement(&self, w: &[f32]) -> f32 {
+        w.iter().zip(&self.q).map(|(a, b)| a * b).sum()
+    }
+
+    pub fn velocity(&self, w: &[f32]) -> f32 {
+        w.iter()
+            .zip(self.q.iter().zip(&self.q_prev))
+            .map(|(a, (q, qp))| a * (q - qp))
+            .sum()
+    }
+
+    /// Set the external modal force for the next step.
+    pub fn push_raw(&mut self, f: &[f32]) {
+        self.ext.copy_from_slice(f);
+    }
+
+    /// Set the external per-mode damping for the next step.
+    pub fn damp_raw(&mut self, d: &[f32]) {
+        self.ext_damp.copy_from_slice(d);
+    }
+
+    /// The disc's center coordinate.
+    pub fn center(&self) -> f32 {
+        self.modes.disc.center
+    }
+
+    pub fn wake(&mut self) {
+        self.quiet = 0;
+    }
+
+    /// A stand's felt: extra loss on the modes below `cut_hz`, per
+    /// call, full at DC and tapering to nothing at the cut. Applied
+    /// to the state directly so it needs no coefficient change.
+    pub fn stand_damp(&mut self, loss: f32, cut_hz: f32) {
+        let cut = (std::f32::consts::TAU * cut_hz / SR_INT).powi(2);
+        for i in 0..self.q.len() {
+            if self.w2[i] < cut {
+                let k = 1.0 - loss * (1.0 - self.w2[i] / cut);
+                self.q[i] *= k;
+                self.q_prev[i] *= k;
+            }
+        }
+    }
+
     pub fn strike(&mut self, strength: f32) {
         self.stick.throw(self.under_stick(), strength * STICK_V);
         self.quiet = 0;
@@ -450,7 +521,7 @@ impl Cymbal {
             .stick
             .step(self.under_stick(), self.p.hardness, self.patch_mass);
         for i in 0..n {
-            self.force[i] = f * self.phi_patch[i];
+            self.force[i] = f * self.phi_patch[i] + self.ext[i];
         }
         // The cubic coupling. Its stiffness K(q_n) = ν Σ_p η_p H^p is
         // split: each mode's self term goes on the new state
@@ -508,9 +579,12 @@ impl Cymbal {
         }
         for i in 0..n {
             let dk = self.dk[i].max(-0.5 * self.w2[i]);
+            // Implicit external damping: force −d·(q_next − q_prev)/2.
+            let hd = 0.5 * self.cf[i] * self.ext_damp[i];
             self.q_next[i] = (self.c1[i] * self.q[i] - self.c2[i] * self.q_prev[i]
-                + self.cf[i] * self.force[i])
-                / (1.0 + self.cf[i] * dk);
+                + self.cf[i] * self.force[i]
+                + hd * self.q_prev[i])
+                / (1.0 + self.cf[i] * dk + hd);
         }
         let mut energy = potential;
         let mut diss = 0.0f32;

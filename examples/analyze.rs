@@ -9,12 +9,13 @@
 //!
 //! --f0 pins the fundamental when the automatic pick (strongest
 //! component under 400 Hz in the settled ring) lands on an overtone.
-//! `mesh:<kick|snare|tomhi|tom|tomlo>` or `plate:<ride|crash>` (FD plate) or `cymbal:<ride|crash>` (modal) renders that mesh default (strength
+//! `mesh:<kick|snare|tomhi|tom|tomlo>` or `plate:<ride|crash>` (FD plate) or `cymbal:<ride|crash>` (modal) or `hat:<open|closed>` renders that mesh default (strength
 //! 1.0, or --strength S) as a column, for calibrating against the
 //! recording beside it.
 
 use timber::analyze::{self, Report};
 use timber::cymbal::{self, Cymbal};
+use timber::hihat;
 use timber::mesh::{self, Mesh, MeshParams};
 use timber::plate::{self, Plate, PlateParams};
 use timber::util::{Rng, SR};
@@ -88,6 +89,20 @@ fn render_cymbal(name: &str, strength: f32) -> Vec<f32> {
     (0..(1.5 * SR) as usize).map(|_| m.tick(&mut rng)).collect()
 }
 
+fn render_hat(which: &str, strength: f32) -> Vec<f32> {
+    let modes = std::sync::Arc::new(cymbal::Modes::compute());
+    let mut h = hihat::HiHat::new(modes, hihat::default_params());
+    let mut rng = Rng(3);
+    if which == "closed" {
+        h.pedal(true);
+        for _ in 0..(0.2 * SR) as usize {
+            h.tick(&mut rng);
+        }
+    }
+    h.strike(strength);
+    (0..(1.5 * SR) as usize).map(|_| h.tick(&mut rng)).collect()
+}
+
 fn main() {
     let mut f0: Option<f32> = None;
     let mut strength = 1.0f32;
@@ -112,6 +127,10 @@ fn main() {
             if let Some(name) = path.strip_prefix("mesh:") {
                 let hit = analyze::normalize(render_mesh(name, strength));
                 return analyze::report(&format!("mesh:{name}"), &hit, f0);
+            }
+            if let Some(which) = path.strip_prefix("hat:") {
+                let hit = analyze::normalize(render_hat(which, strength));
+                return analyze::report(&format!("hat:{which}"), &hit, f0);
             }
             if let Some(name) = path.strip_prefix("cymbal:") {
                 let hit = analyze::normalize(render_cymbal(name, strength));
