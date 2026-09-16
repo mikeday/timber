@@ -1645,3 +1645,21 @@ pub const TAMBOURINE: &[Mode] = &[
         decay: 0.05,
     },
 ];
+
+/// The Simmons SDS-V tom — 1981, and the sound of every record intro
+/// for the rest of the decade. Not a drum: a resonant filter pinged
+/// by a trigger, with a pitch envelope sweeping down and a noise
+/// "click" mixed in. One mode, then, with a whisper of its octave;
+/// the sweep and the click are the pad's `glide` and `rattle`.
+pub const SIMMONS: &[Mode] = &[
+    Mode {
+        ratio: 1.00,
+        gain: 1.00,
+        decay: 0.45,
+    },
+    Mode {
+        ratio: 2.00,
+        gain: 0.12,
+        decay: 0.2,
+    },
+];

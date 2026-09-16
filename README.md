@@ -50,8 +50,9 @@ Models, in `src/`:
 
 The desk is a realtime mixing desk (egui + cpal). Keys: the number
 keys pick a *bank* — `1` the modal kit, `2` the physical kit, `3` bell,
-triangle, gong, clap, cowbell, wood block, tambourine and shaker, `4`–`7` marimba, vibes, steel pan and
-bell on the melody keys — and the bottom row `Z X C V B N M , . /`
+triangle, gong, clap, cowbell, wood block, tambourine, shaker and a
+Simmons disco tom, `4`–`8` marimba, vibes, steel pan, bell and the
+disco tom on the melody keys — and the bottom row `Z X C V B N M , . /`
 plays it (`Tab` flips modal ↔ physical). The two kits mirror each
 other slot for slot: kick, snare, three toms, hat, open hat, crash,
 ride, then the clap (modal) or the hi-hat's foot, held (physical).

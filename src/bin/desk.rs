@@ -539,6 +539,7 @@ enum ModeSet {
     Cowbell,
     Woodblock,
     Tambourine,
+    Simmons,
     NoiseOnly,
 }
 
@@ -560,6 +561,7 @@ impl ModeSet {
             ModeSet::Cowbell => modal::COWBELL,
             ModeSet::Woodblock => modal::WOODBLOCK,
             ModeSet::Tambourine => modal::TAMBOURINE,
+            ModeSet::Simmons => modal::SIMMONS,
             ModeSet::NoiseOnly => &[],
         }
     }
@@ -580,6 +582,7 @@ impl ModeSet {
             ModeSet::Cowbell => "cowbell",
             ModeSet::Woodblock => "wood block",
             ModeSet::Tambourine => "tambourine",
+            ModeSet::Simmons => "Simmons tom",
             ModeSet::NoiseOnly => "noise only",
         }
     }
@@ -843,6 +846,21 @@ fn default_pads() -> Vec<DrumParams> {
             level: 0.35,
             ..base
         },
+        // The Simmons disco tom: a big downward sweep on a single
+        // resonance, a click on the front, some drive. Play it from
+        // the melody keys for the descending fill (bank 8).
+        DrumParams {
+            name: "disco tom",
+            modes: ModeSet::Simmons,
+            freq: 150.0,
+            glide: 0.7,
+            glide_time: 0.16,
+            noise: 0.35,
+            noise_decay: 0.003,
+            drive: 1.2,
+            level: 0.7,
+            ..base
+        },
         DrumParams {
             name: "bell",
             modes: ModeSet::Bell,
@@ -965,7 +983,7 @@ const ROW_KEYS: [egui::Key; 10] = [
     egui::Key::Slash,
 ];
 const NROW: usize = ROW_KEYS.len();
-const BANK_KEYS: [egui::Key; 7] = [
+const BANK_KEYS: [egui::Key; 8] = [
     egui::Key::Num1,
     egui::Key::Num2,
     egui::Key::Num3,
@@ -973,6 +991,7 @@ const BANK_KEYS: [egui::Key; 7] = [
     egui::Key::Num5,
     egui::Key::Num6,
     egui::Key::Num7,
+    egui::Key::Num8,
 ];
 
 /// A bank: what the bottom row plays. The two kits mirror each other
@@ -987,13 +1006,13 @@ enum Bank {
     /// hi-hat with its foot on the last key (shift = hard hit).
     Physical,
     /// The modal kit's other percussion: bell, triangle, gong, clap,
-    /// cowbell, wood block, tambourine, shaker.
+    /// cowbell, wood block, tambourine, shaker, Simmons disco tom.
     Percussion,
     /// A tuned modal pad on the melody keys.
     Tuned(&'static str),
 }
 
-const BANKS: [Bank; 7] = [
+const BANKS: [Bank; 8] = [
     Bank::Modal,
     Bank::Physical,
     Bank::Percussion,
@@ -1001,6 +1020,7 @@ const BANKS: [Bank; 7] = [
     Bank::Tuned("vibes"),
     Bank::Tuned("steel pan"),
     Bank::Tuned("bell"),
+    Bank::Tuned("disco tom"),
 ];
 
 impl Bank {
@@ -1041,7 +1061,7 @@ const PERC_ROW: [&str; 10] = [
     "wood block",
     "tambourine",
     "shaker",
-    "",
+    "disco tom",
     "",
 ];
 const NOTE_KEYS: [egui::Key; 8] = [
@@ -1883,7 +1903,7 @@ impl eframe::App for Desk {
                 Bank::Physical => ui.small(format!("{}  (shift = hard hit)", row.join(" "))),
                 _ => ui.small(format!("{}  (shift = roll)", row.join(" "))),
             };
-            ui.small("1–7 — bank · tab — modal ↔ physical");
+            ui.small("1–8 — bank · tab — modal ↔ physical");
             ui.small("A S D F G H J K — pluck (finger, while bowing)");
             ui.small("Q W E R T — vowels");
             ui.small("hold bow surface — bow");
@@ -1976,6 +1996,7 @@ impl eframe::App for Desk {
                                 ModeSet::Cowbell,
                                 ModeSet::Woodblock,
                                 ModeSet::Tambourine,
+                                ModeSet::Simmons,
                                 ModeSet::NoiseOnly,
                             ] {
                                 edited |= ui.selectable_value(&mut p.modes, m, m.name()).changed();
