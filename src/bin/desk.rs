@@ -32,7 +32,7 @@ use std::sync::{Arc, Mutex};
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use eframe::egui;
 
-use timber::looper::Looper;
+use timber::looper::{self, Looper};
 use timber::util::{AtomicF32, Rng, SR};
 use timber::voice::{self, Note, Vowel};
 use timber::{body, cymbal, drums, hihat, mesh, modal, mouth, sing, speak, stream, tract};
@@ -156,6 +156,8 @@ struct LoopCtl {
     bpm: AtomicF32,
     quantize: AtomicBool,
     click: AtomicBool,
+    /// Tap-tempo armed for the next recording.
+    tap: AtomicBool,
     /// looper::State as usize, layers, playhead fraction, length s.
     state: AtomicUsize,
     layers: AtomicUsize,
@@ -283,6 +285,7 @@ fn start_audio(
                 let tp = tract::Params::read(&tract_ctl);
                 looper.bpm = loop_ctl.bpm.get();
                 looper.quantize = loop_ctl.quantize.load(Relaxed);
+                looper.tap = loop_ctl.tap.load(Relaxed);
                 while let Ok(msg) = rx.try_recv() {
                     // Hits go through the looper (which records them if
                     // it is listening) and then to the instruments.
@@ -316,7 +319,14 @@ fn start_audio(
                         | Msg::NoteRoll(..)
                         | Msg::NoteOff(..) => unreachable!(),
                         Msg::HatPad(params) => ins.hat.set_params(params),
-                        Msg::Loop(LoopCmd::Toggle) => looper.toggle(clock),
+                        Msg::Loop(LoopCmd::Toggle) => {
+                            if looper.toggle(clock) {
+                                // A tapped tempo: hand it back to the UI.
+                                loop_ctl.bpm.set(looper.bpm);
+                                loop_ctl.quantize.store(true, Relaxed);
+                                loop_ctl.tap.store(false, Relaxed);
+                            }
+                        }
                         Msg::Loop(LoopCmd::Stop) => looper.stop(clock),
                         Msg::Loop(LoopCmd::Undo) => looper.undo(),
                         Msg::Loop(LoopCmd::Clear) => looper.clear(),
@@ -375,6 +385,11 @@ fn start_audio(
                         click_f = if one { 2000.0 } else { 1400.0 };
                     }
                     if clock.is_multiple_of(256) {
+                        if let Some(bpm) = looper.tap_bpm()
+                            && looper.state() == looper::State::Recording
+                        {
+                            loop_ctl.bpm.set(bpm);
+                        }
                         loop_ctl.state.store(looper.state() as usize, Relaxed);
                         loop_ctl.layers.store(looper.layers(), Relaxed);
                         loop_ctl.pos.set(looper.position(clock));
@@ -1768,12 +1783,18 @@ impl eframe::App for Desk {
                     let _ = self.tx.send(Msg::Loop(LoopCmd::Clear));
                 }
             });
-            let text = if state == "recording" {
+            let text = if state == "recording" && self.loop_ctl.tap.load(Relaxed) {
+                format!(
+                    "tapping… {:.0} bpm (space to set it)",
+                    self.loop_ctl.bpm.get()
+                )
+            } else if state == "recording" {
                 format!("recording… {:.1}s", self.loop_ctl.pos.get())
             } else if len > 0.0 {
                 format!(
-                    "{state} · {layers} layer{} · {len:.1}s",
-                    if layers == 1 { "" } else { "s" }
+                    "{state} · {layers} layer{} · {len:.1}s · {:.0} bpm",
+                    if layers == 1 { "" } else { "s" },
+                    self.loop_ctl.bpm.get()
                 )
             } else {
                 "idle — space to record".into()
@@ -1793,6 +1814,26 @@ impl eframe::App for Desk {
             };
             ui.add(bar);
             ui.horizontal(|ui| {
+                let mut tap = self.loop_ctl.tap.load(Relaxed);
+                if ui
+                    .toggle_value(&mut tap, "tap tempo")
+                    .on_hover_text(
+                        "arm, then space, tap one pad steadily (4+ times), space: \
+                         the tempo is set from your taps and the pad keeps tapping",
+                    )
+                    .changed()
+                {
+                    self.loop_ctl.tap.store(tap, Relaxed);
+                }
+                let bpm = self.loop_ctl.bpm.get();
+                if ui.small_button("÷2").clicked() {
+                    self.loop_ctl.bpm.set((bpm * 0.5).max(20.0));
+                }
+                if ui.small_button("×2").clicked() {
+                    self.loop_ctl.bpm.set((bpm * 2.0).min(400.0));
+                }
+            });
+            ui.horizontal(|ui| {
                 let mut q = self.loop_ctl.quantize.load(Relaxed);
                 if ui.checkbox(&mut q, "quantize").changed() {
                     self.loop_ctl.quantize.store(q, Relaxed);
@@ -1802,7 +1843,7 @@ impl eframe::App for Desk {
                     self.loop_ctl.click.store(c, Relaxed);
                 }
             });
-            ctl_slider(ui, &self.loop_ctl.bpm, 50.0..=200.0, false, "bpm");
+            ctl_slider(ui, &self.loop_ctl.bpm, 20.0..=400.0, false, "bpm");
             ui.separator();
             ui.small("space — loop: record / close & play / overdub ↔ jam");
             ui.small("shift+space — stop / restart");
@@ -2522,6 +2563,7 @@ fn main() -> eframe::Result {
         bpm: AtomicF32::new(100.0),
         quantize: AtomicBool::new(false),
         click: AtomicBool::new(false),
+        tap: AtomicBool::new(false),
         state: AtomicUsize::new(0),
         layers: AtomicUsize::new(0),
         pos: AtomicF32::new(0.0),

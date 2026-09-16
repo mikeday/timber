@@ -45,6 +45,15 @@ pub struct Looper<E> {
     /// Grid: beats per minute and whether to snap to it.
     pub bpm: f32,
     pub quantize: bool,
+    /// Tap tempo: the next recording is a steady tap on one pad, and
+    /// closing it sets the tempo from the taps and replaces what was
+    /// played with a bar of four exact taps that keep going as the
+    /// click. The estimate follows the *recent* taps (a weighted
+    /// average leaning on the last few), so speeding up or slowing
+    /// down while tapping moves it, and it is readable while tapping.
+    pub tap: bool,
+    /// The running tap estimate, samples per tap.
+    tap_est: Option<f32>,
 }
 
 impl<E: Clone> Looper<E> {
@@ -60,6 +69,8 @@ impl<E: Clone> Looper<E> {
             last_pos: 0,
             bpm: 100.0,
             quantize: false,
+            tap: false,
+            tap_est: None,
         }
     }
 
@@ -87,6 +98,38 @@ impl<E: Clone> Looper<E> {
         }
     }
 
+    /// The tempo the taps so far imply, while tapping.
+    pub fn tap_bpm(&self) -> Option<f32> {
+        self.tap_est.map(|t| 60.0 * SR / t)
+    }
+
+    /// Re-estimate from the taps recorded so far: a weighted average
+    /// of the last five gaps, newest weighted most (0.55 per step
+    /// back), each gap clamped to within a factor of two of the
+    /// running estimate so a doubled or missed tap can't throw it.
+    fn estimate_taps(&mut self) {
+        let offs: Vec<u64> = self.pending.iter().map(|(o, _)| *o).collect();
+        if offs.len() < 2 {
+            return;
+        }
+        let mut est = self.tap_est;
+        let (mut num, mut den) = (0.0f32, 0.0f32);
+        let gaps: Vec<f32> = offs.windows(2).map(|w| (w[1] - w[0]) as f32).collect();
+        for (k, &g) in gaps.iter().rev().take(5).enumerate() {
+            let g = match est {
+                Some(e) => g.clamp(0.5 * e, 2.0 * e),
+                None => g,
+            };
+            let w = 0.55f32.powi(k as i32);
+            num += w * g;
+            den += w;
+            if est.is_none() {
+                est = Some(g);
+            }
+        }
+        self.tap_est = Some(num / den);
+    }
+
     fn sixteenth(&self) -> u64 {
         ((SR * 60.0 / self.bpm.max(20.0)) / 4.0).round() as u64
     }
@@ -100,15 +143,40 @@ impl<E: Clone> Looper<E> {
     }
 
     /// The one-button control: idle → recording → playing, then
-    /// playing ↔ overdub. (Stopped resumes to playing.)
-    pub fn toggle(&mut self, now: u64) {
+    /// playing ↔ overdub. (Stopped resumes to playing.) Returns true
+    /// when closing a tap-tempo recording set the tempo.
+    pub fn toggle(&mut self, now: u64) -> bool {
+        let mut tapped = false;
         self.state = match self.state {
             State::Idle => {
                 self.origin = now;
                 self.layers.clear();
                 self.pending.clear();
                 self.merged.clear();
+                self.tap_est = None;
                 State::Recording
+            }
+            State::Recording if self.tap && self.tap_est.is_some() => {
+                // Tap tempo: the running estimate is the tempo; the
+                // loop is four taps of it, exactly spaced, and beat one
+                // is the *last* tap — the next click lands one beat
+                // after the last thing played, whatever the tempo did
+                // along the way (anchored to the first tap, a drifting
+                // tempo left the clicks out of phase with the hand).
+                let t = self.tap_est.unwrap_or(SR).max(1.0);
+                self.bpm = (60.0 * SR / t).clamp(20.0, 400.0);
+                self.quantize = true;
+                let t = (60.0 * SR / self.bpm).round() as u64;
+                let last = self.pending.iter().map(|(o, _)| *o).max().unwrap_or(0);
+                self.origin += last;
+                let e = self.pending[0].1.clone();
+                self.pending = (0..4).map(|k| (k * t, e.clone())).collect();
+                self.len = 4 * t;
+                self.tap = false;
+                tapped = true;
+                self.commit();
+                self.start_at(now);
+                State::Playing
             }
             State::Recording => {
                 let mut len = (now - self.origin).max(1);
@@ -118,9 +186,9 @@ impl<E: Clone> Looper<E> {
                     len = ((len + bar / 2) / bar).max(1) * bar;
                 }
                 self.len = len;
+                self.tap = false;
                 self.commit();
-                self.cursor = 0;
-                self.last_pos = 0;
+                self.start_at(now);
                 State::Playing
             }
             State::Playing => State::Overdub,
@@ -137,6 +205,7 @@ impl<E: Clone> Looper<E> {
                 State::Playing
             }
         };
+        tapped
     }
 
     /// Stop a cycling loop (keeping it), or restart a stopped one from
@@ -166,8 +235,13 @@ impl<E: Clone> Looper<E> {
                 if self.pending.is_empty() {
                     self.origin = now;
                 }
-                let off = self.snap(now.saturating_sub(self.origin));
+                // Taps are timed raw: the grid is what they will set.
+                let raw = now.saturating_sub(self.origin);
+                let off = if self.tap { raw } else { self.snap(raw) };
                 self.pending.push((off, e));
+                if self.tap {
+                    self.estimate_taps();
+                }
             }
             State::Overdub => {
                 let off = self.snap((now - self.origin) % self.len) % self.len;
@@ -175,6 +249,18 @@ impl<E: Clone> Looper<E> {
             }
             _ => {}
         }
+    }
+
+    /// Begin playing at the loop's current phase: events already
+    /// behind `now` in this pass are skipped, not fired late (closing
+    /// a tap loop a beat after the last tap must not click at once).
+    fn start_at(&mut self, now: u64) {
+        self.last_pos = (now - self.origin) % self.len.max(1);
+        self.cursor = self
+            .merged
+            .iter()
+            .position(|(o, _)| *o >= self.last_pos)
+            .unwrap_or(self.merged.len());
     }
 
     /// Turn the pending pass into a layer.
@@ -317,6 +403,60 @@ mod tests {
     }
 
     #[test]
+    fn tap_tempo_follows_the_recent_taps() {
+        // Speeding up from 90 to 140 bpm: the estimate must end near
+        // the tempo of the last taps, not the average of all of them.
+        let mut l: Looper<u8> = Looper::new();
+        l.tap = true;
+        l.toggle(0);
+        let mut t = 1000u64;
+        for k in 0..12 {
+            let bpm = 90.0 + 50.0 * k as f32 / 11.0;
+            l.record(t, 5);
+            t += (60.0 * SR / bpm) as u64;
+        }
+        // The last *gap* was at ~135 bpm (the final tap has no gap
+        // after it); the mean of all gaps is ~113.
+        let live = l.tap_bpm().unwrap();
+        assert!((live - 135.0).abs() < 6.0, "live estimate {live}");
+        let last_tap = t - (60.0 * SR / 140.0) as u64;
+        assert!(l.toggle(t));
+        assert!((l.bpm - live).abs() < 0.01);
+        // The next click lands one beat after the last tap.
+        let beat = (60.0 * SR / l.bpm).round() as u64;
+        let got = play(&mut l, t, last_tap + beat + 1);
+        assert_eq!(got.len(), 1, "{got:?}");
+        assert_eq!(got[0].0, last_tap + beat);
+    }
+
+    #[test]
+    fn tap_tempo_sets_the_bpm_and_keeps_tapping() {
+        let mut l: Looper<u8> = Looper::new();
+        l.tap = true;
+        l.toggle(0);
+        // Taps at 120 bpm (22050 samples) with one late one.
+        for t in [0u64, 22050, 44100 + 900, 66150, 88200] {
+            l.record(1000 + t, 5);
+        }
+        assert!(l.toggle(1000 + 100_000));
+        assert!((l.bpm - 120.0).abs() < 2.0, "bpm {}", l.bpm);
+        assert!(l.quantize && !l.tap);
+        assert!((l.len_secs() - 2.0).abs() < 0.05, "len {}", l.len_secs());
+        // It keeps tapping, exactly on the grid (the first event after
+        // an unaligned start may fire late; every gap after is exact).
+        let got = play(&mut l, 101_000, 101_000 + 2 * 88_200);
+        let times: Vec<u64> = got.iter().map(|(t, _)| *t).collect();
+        assert!(times.len() >= 8, "{times:?}");
+        let gaps: Vec<u64> = times.windows(2).skip(1).map(|w| w[1] - w[0]).collect();
+        assert!(gaps.iter().all(|g| *g == gaps[0]), "uneven: {times:?}");
+        assert!(
+            (gaps[0] as f32 / 22050.0 - 1.0).abs() < 0.02,
+            "gap {}",
+            gaps[0]
+        );
+    }
+
+    #[test]
     fn quantize_snaps_hits_and_length() {
         let mut l: Looper<u8> = Looper::new();
         l.bpm = 120.0;
@@ -332,12 +472,9 @@ mod tests {
         l.toggle(close);
         assert_eq!(l.len_secs(), bar as f32 / SR);
         let got = play(&mut l, close, origin + 2 * bar + 1);
-        // Beat one had already passed when the loop closed (it sounds
-        // late, once); the second hit is snapped to the sixteenth; the
-        // next pass starts on time.
-        assert_eq!(
-            got,
-            vec![(close, 1), (origin + bar + g, 2), (origin + 2 * bar, 1)]
-        );
+        // Beat one had already passed when the loop closed, so it is
+        // skipped rather than sounded late; the second hit is snapped
+        // to the sixteenth; the next pass starts on time.
+        assert_eq!(got, vec![(origin + bar + g, 2), (origin + 2 * bar, 1)]);
     }
 }

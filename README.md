@@ -63,7 +63,8 @@ melody keys with "melody keys" on. Hold the bow
 surface to bow, the mouth surface to sing; type phonemes in the tract
 box to speak. `Space` runs the looper (record → play → overdub ↔ jam;
 shift+Space stops), `Backspace` undoes a layer (shift+Backspace
-clears). Under the panels, the mesh head and cymbal plate are drawn
+clears); arm "tap tempo", tap one pad steadily and close, and the
+tempo is set from your taps with the pad kept tapping as the click. Under the panels, the mesh head and cymbal plate are drawn
 live (energy view: the mode shapes, Chladni-style), and the modal
 pad's partials as a ladder lit by what is ringing.
 
