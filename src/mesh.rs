@@ -666,13 +666,13 @@ pub fn default_kit() -> Vec<(&'static str, MeshParams)> {
     };
     vec![
         // 18" jazz kick: 46 Hz, dead in 70 ms, felt beater, a
-        // shell's worth of air; the coupled pair carries what tail
-        // there is.
+        // shell's worth of air and a full resonant head on it; the
+        // coupled pair carries what tail there is.
         (
             "kick",
             MeshParams {
                 freq: 50.0,
-                decay: 0.1,
+                decay: 0.12,
                 hf_damp: 0.3,
                 tension: 25.0,
                 strike_pos: 0.12,
@@ -680,15 +680,18 @@ pub fn default_kit() -> Vec<(&'static str, MeshParams)> {
                 drive: 1.5,
                 air: 0.3,
                 reso_freq: 42.0,
-                reso_decay: 0.15,
+                reso_decay: 0.3,
                 hardness: 0.05,
                 mallet: 3.0,
                 level: 2.0,
+                two_heads: true,
+                shell: 0.05,
                 ..base
             },
         ),
         // Dry snare: the head is gone in 40 ms and bends a quarter
-        // tone… a fifth; the wires are the note.
+        // tone… a fifth; the wires are the note. The snare-side head
+        // is thin and tuned high, on a shallow shell.
         (
             "snare",
             MeshParams {
@@ -701,6 +704,11 @@ pub fn default_kit() -> Vec<(&'static str, MeshParams)> {
                 click: 0.2,
                 hardness: 0.9,
                 mallet: 1.2,
+                air: 0.1,
+                reso_freq: 260.0,
+                reso_decay: 0.06,
+                two_heads: true,
+                shell: 0.06,
                 ..base
             },
         ),
