@@ -1557,3 +1557,91 @@ pub const WOODBLOCK: &[Mode] = &[
         decay: 0.02,
     },
 ];
+
+/// Tambourine jingles: a dozen-odd small cymbal pairs, each a plate
+/// with its own inharmonic ping, clashing — a dense, irregular
+/// cluster from a couple of kHz up, all short. Seeded jitter, as for
+/// the cymbal tables; the sound is the density. The head's thud and
+/// the jingles' rattle are the pad's noise burst.
+pub const TAMBOURINE: &[Mode] = &[
+    Mode {
+        ratio: 0.97,
+        gain: 0.84,
+        decay: 0.12,
+    },
+    Mode {
+        ratio: 1.31,
+        gain: 0.92,
+        decay: 0.11,
+    },
+    Mode {
+        ratio: 1.50,
+        gain: 0.62,
+        decay: 0.10,
+    },
+    Mode {
+        ratio: 1.76,
+        gain: 0.61,
+        decay: 0.10,
+    },
+    Mode {
+        ratio: 2.18,
+        gain: 0.57,
+        decay: 0.09,
+    },
+    Mode {
+        ratio: 2.41,
+        gain: 0.61,
+        decay: 0.09,
+    },
+    Mode {
+        ratio: 2.61,
+        gain: 0.72,
+        decay: 0.08,
+    },
+    Mode {
+        ratio: 3.08,
+        gain: 0.80,
+        decay: 0.08,
+    },
+    Mode {
+        ratio: 3.05,
+        gain: 0.64,
+        decay: 0.07,
+    },
+    Mode {
+        ratio: 3.37,
+        gain: 0.94,
+        decay: 0.07,
+    },
+    Mode {
+        ratio: 3.94,
+        gain: 0.90,
+        decay: 0.07,
+    },
+    Mode {
+        ratio: 4.24,
+        gain: 0.87,
+        decay: 0.06,
+    },
+    Mode {
+        ratio: 4.60,
+        gain: 0.90,
+        decay: 0.06,
+    },
+    Mode {
+        ratio: 4.50,
+        gain: 0.92,
+        decay: 0.06,
+    },
+    Mode {
+        ratio: 4.91,
+        gain: 0.88,
+        decay: 0.06,
+    },
+    Mode {
+        ratio: 5.24,
+        gain: 0.71,
+        decay: 0.05,
+    },
+];

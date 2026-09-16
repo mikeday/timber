@@ -15,8 +15,8 @@ Models, in `src/`:
   drone mode.
 - `modal` / `drums` — a modal kit: resonator banks with typed-in mode
   tables (membranes, a snare head, a church bell, triangle, cowbell,
-  wood block, marimba and vibraphone bars, a steel pan, and synth
-  cymbal/ride/gong/hi-hat pictures), plus rattle, shimmer, drive, a wash bloom, a mallet
+  wood block, tambourine, marimba and vibraphone bars, a steel pan,
+  and synth cymbal/ride/gong/hi-hat pictures), plus rattle, shimmer, drive, a wash bloom, a mallet
   attack, tremolo, rolls and the 808 handclap. Tuned pads play
   polyphonically from the melody keys; the steel pan's table and
   envelope were fitted to recordings. The "record" drums, and tuned
@@ -50,7 +50,7 @@ Models, in `src/`:
 
 The desk is a realtime mixing desk (egui + cpal). Keys: the number
 keys pick a *bank* — `1` the modal kit, `2` the physical kit, `3` bell,
-triangle, gong, clap, cowbell and wood block, `4`–`7` marimba, vibes, steel pan and
+triangle, gong, clap, cowbell, wood block, tambourine and shaker, `4`–`7` marimba, vibes, steel pan and
 bell on the melody keys — and the bottom row `Z X C V B N M , . /`
 plays it (`Tab` flips modal ↔ physical). The two kits mirror each
 other slot for slot: kick, snare, three toms, hat, open hat, crash,
@@ -73,9 +73,9 @@ measure the sound (pitch, decay, formants, wash) rather than the code.
 
 Diagnostics in `examples/` print what the models do — `compare`
 (modal vs mesh drum), `analyze` (a recording, or `mesh:tomlo`,
-`cymbal:crash`, `hat:open`), `stickprobe`, `washprobe`, `doublehit`,
-`modalprobe`, `hatprobe`, `panprobe` and friends — and were how most
-of the calibration decisions were made.
+`cymbal:crash`, `hat:open`), `stickprobe`, `doublehit`, `modalprobe`,
+`hatprobe`, `panprobe`, `meshprobe`, `bowprobe`, `tractprobe` — and
+were how most of the calibration decisions were made.
 
 One honest limit: the physical cymbals and hi-hat run on a disc whose
 modes stop near 3 kHz, so they come out darker than the metal they

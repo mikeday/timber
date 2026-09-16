@@ -523,6 +523,7 @@ enum ModeSet {
     Pan,
     Cowbell,
     Woodblock,
+    Tambourine,
     NoiseOnly,
 }
 
@@ -543,6 +544,7 @@ impl ModeSet {
             ModeSet::Pan => modal::PAN,
             ModeSet::Cowbell => modal::COWBELL,
             ModeSet::Woodblock => modal::WOODBLOCK,
+            ModeSet::Tambourine => modal::TAMBOURINE,
             ModeSet::NoiseOnly => &[],
         }
     }
@@ -562,6 +564,7 @@ impl ModeSet {
             ModeSet::Pan => "steel pan",
             ModeSet::Cowbell => "cowbell",
             ModeSet::Woodblock => "wood block",
+            ModeSet::Tambourine => "tambourine",
             ModeSet::NoiseOnly => "noise only",
         }
     }
@@ -796,6 +799,35 @@ fn default_pads() -> Vec<DrumParams> {
             level: 0.55,
             ..base
         },
+        // Tambourine: the jingle cluster under a bright rattle burst.
+        DrumParams {
+            name: "tambourine",
+            modes: ModeSet::Tambourine,
+            // From recordings (samples/tamb_*): a hit is *short* — −17 dB
+            // by 100 ms, −39 by 400 — and stays bright, because what
+            // lingers is the jingles' ping at 3–6 kHz, not noise. So:
+            // a short flat burst, clashed twice (the jingles bounce
+            // once ~5 ms after the hit), over an unmuffled cluster.
+            freq: 3800.0,
+            noise: 1.0,
+            noise_decay: 0.035,
+            noise_tone: 0.1,
+            claps: 2,
+            shimmer: 0.5,
+            level: 0.45,
+            ..base
+        },
+        // Shaker: nothing but the rattle — a short burst of the
+        // brightest wash, no partials at all.
+        DrumParams {
+            name: "shaker",
+            modes: ModeSet::NoiseOnly,
+            noise: 1.0,
+            noise_decay: 0.045,
+            noise_tone: 0.9,
+            level: 0.35,
+            ..base
+        },
         DrumParams {
             name: "bell",
             modes: ModeSet::Bell,
@@ -940,7 +972,7 @@ enum Bank {
     /// hi-hat with its foot on the last key (shift = hard hit).
     Physical,
     /// The modal kit's other percussion: bell, triangle, gong, clap,
-    /// cowbell, wood block.
+    /// cowbell, wood block, tambourine, shaker.
     Percussion,
     /// A tuned modal pad on the melody keys.
     Tuned(&'static str),
@@ -992,8 +1024,8 @@ const PERC_ROW: [&str; 10] = [
     "clap",
     "cowbell",
     "wood block",
-    "",
-    "",
+    "tambourine",
+    "shaker",
     "",
     "",
 ];
@@ -1824,14 +1856,55 @@ impl eframe::App for Desk {
                     // ---- Drums.
                     let ui = &mut cols[0];
                     ui.heading("drums · modal");
+                    // The pads the keyboard is playing right now, in key
+                    // order (the bank), labelled with their keys; every
+                    // other modal pad is a fold away.
                     let mut strikes = Vec::new();
+                    let slots = self.slots();
+                    let on_row: Vec<usize> = slots
+                        .iter()
+                        .filter_map(|s| match s {
+                            Slot::Pad(i) => Some(*i),
+                            _ => None,
+                        })
+                        .collect();
+                    let tuned = match self.bank {
+                        Bank::Tuned(n) => self.pad_named(n),
+                        _ => None,
+                    };
                     ui.horizontal_wrapped(|ui| {
-                        for (i, p) in self.pads.iter().enumerate() {
-                            if ui.selectable_label(self.pad_sel == i, p.name).clicked() {
+                        if let Some(i) = tuned {
+                            let label = format!("{} (melody keys)", self.pads[i].name);
+                            if ui.selectable_label(self.pad_sel == i, label).clicked() {
                                 strikes.push(i);
                             }
                         }
+                        for (k, s) in slots.iter().enumerate() {
+                            if let Slot::Pad(i) = s {
+                                let label = format!("{} {}", key_label(ROW_KEYS[k]), self.pads[*i].name);
+                                if ui.selectable_label(self.pad_sel == *i, label).clicked() {
+                                    strikes.push(*i);
+                                }
+                            }
+                        }
+                        if on_row.is_empty() && tuned.is_none() {
+                            ui.small("bank 2 is the physical kit — see its panels");
+                        }
                     });
+                    egui::CollapsingHeader::new("all modal pads")
+                        .default_open(false)
+                        .show(ui, |ui| {
+                            ui.horizontal_wrapped(|ui| {
+                                for (i, p) in self.pads.iter().enumerate() {
+                                    if on_row.contains(&i) || tuned == Some(i) {
+                                        continue;
+                                    }
+                                    if ui.selectable_label(self.pad_sel == i, p.name).clicked() {
+                                        strikes.push(i);
+                                    }
+                                }
+                            });
+                        });
                     for i in strikes {
                         self.strike(i);
                     }
@@ -1861,6 +1934,7 @@ impl eframe::App for Desk {
                                 ModeSet::Pan,
                                 ModeSet::Cowbell,
                                 ModeSet::Woodblock,
+                                ModeSet::Tambourine,
                                 ModeSet::NoiseOnly,
                             ] {
                                 edited |= ui.selectable_value(&mut p.modes, m, m.name()).changed();
